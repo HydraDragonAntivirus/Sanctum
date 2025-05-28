@@ -132,7 +132,7 @@ fn main() {
 
 fn svc_name() -> Vec<u16> {
     let mut svc_name: Vec<u16> = vec![];
-    "sanctum_ppl_runners"
+    "sanctum_ppl_runner"
         .encode_utf16()
         .for_each(|c| svc_name.push(c));
     svc_name.push(0);
@@ -152,7 +152,7 @@ fn svc_bin_path() -> Vec<u16> {
 
 fn create_event_source_key() -> windows::core::Result<()> {
     let subkey_path =
-        to_wstring("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\SanctumPPLRunners");
+        to_wstring("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\SanctumPPLRunner");
 
     let mut hkey: HKEY = HKEY(null_mut());
     let mut disposition: u32 = 0;
