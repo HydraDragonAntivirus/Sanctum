@@ -56,6 +56,9 @@ As a **summary** of features:
 The installation instructions are split between your **host** and **guest**. If you are having problems deploying this, please use the discussions page or raise and issue and I will 
 do my best to help / fix any bugs from the process.
 
+As an overview, the driver must be built via `cargo make`, which is a pipeline provided by Microsoft in the Windows Drivers project. The remaining crates for this 
+project are built via `cargo build`.
+
 ### Guest
 
 1) Install a clean Windows 11 VM; do so first with a Gen2 processor, Secure Boot and TPM so you can properly install windows. I would recommend installing W11 Pro when prompted. You can use either a type 1 or type 2 hypervisor.
