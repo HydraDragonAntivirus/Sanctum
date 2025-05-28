@@ -2,125 +2,136 @@
 
 ![Rust Kernel Driver EDR Sanctum](imgs/evidence/sanctum-cover.webp)
 
-This project is a Windows Driver written in Rust. It now makes full use of [Alternative Syscalls](https://fluxsec.red/alt-syscalls-for-windows-11), an undocumented feature of the Windows 11 Kernel which I have 
-done some research on! The POC for that can be found in this project :). 
+The Sanctum EDR is an **experimental** and **in development** proof of concept for an EDR (Endpoint Detection and Response) tool, fully written in Rust! No
+C required in this project baby!
 
-The README for this project is now quite out of date; it's on my list to fix, but the easiest way you can view its capabilities is from the 'dev log' on my [blog](https://fluxsec.red/sanctum-edr-intro), so I'd recommend having a read through of that,
-where I explain the design decisions I have made, and how I have tried to combat some modern malware tactics!
+I'm documenting this project on my [blog](https://fluxsec.red/)!
 
-The structures used in Alt Syscalls can be seen below:
+Up until recently, the readme was in need of some tlc; given how fast the project has grown the readme was out of date and as time went on some fairly specific
+configuration requirements have arose. See the Deployment Instructions section for clear details on how to install the project **to a VM**. Do not deploy this 
+on your host machine, as we are tampering with the kernel (Windows 11), you may encounter system instability.
 
-![Windows 11 Alt Syscall Structs](imgs/evidence/structs.svg)
+I am not accepting PR's as a rule; unless your contribution is something small / utility based. This project is primarily for my own learning - and hopefully for 
+me to teach the concepts to people interested in low level Windows system security / malware devs / defensive engineering / analysts.
 
-You can find some demos on my [YouTube channel](https://www.youtube.com/@FluxSec) of the EDR. Including, blocking of a live Remcos sample based on behaviour (not static indicators):
+That said; as there is more attention on the project, please feel free to raise issues or use the discussions page as you wish. If you want some integrations, let me know
+and I will look at building those in!
 
-[![YouTube Video](https://img.youtube.com/vi/KEbLtDrur_4/0.jpg)](https://www.youtube.com/watch?v=KEbLtDrur_4)
+#### Contents
 
-Sanctum EDR is an Endpoint Detection and Response proof-of-concept product I am building, that I will use to try combat modern malware techniques that I develop.
+- [Structure](#structure)
+- [Features](#features)
+- [Deployment Instructions](#deployment-instructions)
+- [Requirements](#requirements)
 
-I have started a blog series on Sanctum, you can check it out [on my blog here](https://fluxsec.red/sanctum-edr-intro). I'm keeping track of the progress and milestones of the project there, so please check that out!
+## Structure
 
-Currently in its early stages, I have a plan for the project which I will update in due course. If you like this project, or my work, please feel free to reach out!
+| Crate | Description | 
+| --- | --- |
+| driver | Contains the code for the Sanctum driver which is required for kernel monitoring |
+| um_engine | The usermode engine of the Sanctum application which communicates with the driver, running processes, and the GUI |
+| injected_dll | A DLL injected into all processes for EDR hooking (note that this is currently phased out, having being replaced with kernel-side hooking after I researched [Alt Syscalls for Windows 11](https://fluxsec.red/alt-syscalls-for-windows-11)). I will leave this in the project for legacy / blog post reasons, I have spent a lot of time hooking functions and writing about it on my blog, so good to keep in |
+| gui | A GUI for the Sanctum EDR, using Tauri for rendering |
+| etw_installer | The installer program for creating the ELAM PPL service (installs `sanctum_ppl_runner`) |
+| sanctum_ppl_runner | A ELAM signed Protected Process Light which monitors Events Tracing for Windows Threat Intelligence provider | 
+| shared_* | Shared crates for the project, both in `std` and `no_std` environments | 
+| server | Todo, this is to be the telemetry server which will receive signals from endpoints |
+| etw_consumer | Deprecated; sanctum_ppl_runner implements all required features this was intended to solve. Leaving in for learning reasons / linked to my blog post | 
 
-If you are here to read some code; the best place to start probably is **um_engine**, followed by either the **driver** or **injected_dll**.
+## Features
 
-### Project plan
+You can check my [YouTube channel](https://www.youtube.com/@FluxSec) for some POC videos :)
 
-This is a high level overview for how I would like to structure this project.
+As a **summary** of features:
 
-![High level overview of Sanctum Rust Windows Driver](imgs/planning/sanctum_overview.jpg)
+- [Alt Syscalls](https://fluxsec.red/alt-syscalls-for-windows-11) for kernel-side interception of syscalls
+- Events Tracing for Windows: Threat Intelligence telemetry subscription
+- Uses [Ghost Hunting](https://fluxsec.red/edr-syscall-hooking) to detect signs of malicious activity
+- Detects tampering of NTDLL (thwarts common malware TTPs)
+- Detects rootkit tampering in the kernel
+- DLL injection of EDR (currently deprecated in favour of Alt Syscalls)
 
-A high level view of my API design for the internal application (not counting any web API's) looks as below. I have opted to try keep the interface UmEngine a singleton. The design is somewhat problematic in that if the UmEngine were to be mutable, a mutex would be required to mutate any internal state. The difficulty with this is that this could significantly block the main thread depending on what the mutation / action is. So I am opting at the moment for a non-publicly mutable singleton which maintains it's own state internally, allowing actions to be carried across either OS threads or green threads. The API overview (this may not be up-to-date in terms of exported functions etc):
+## Deployment instructions
 
-![Sanctum Rust Windows Driver API Overview](imgs/evidence/sanctum_api.jpg)
+The installation instructions are split between your **host** and **guest**. If you are having problems deploying this, please use the discussions page or raise and issue and I will 
+do my best to help / fix any bugs from the process.
 
-### Why Rust for writing a Windows Driver
+### Guest
 
-I started writing this driver in C, but having stepped away from C for some time, i missed a lot of Rust's features.
+1) Install a clean Windows 11 VM; do so first with a Gen2 processor, Secure Boot and TPM so you can properly install windows. I would recommend installing W11 Pro when prompted. You can use either a type 1 or type 2 hypervisor.
+2) Update Windows etc.
+3) Disable Secure Boot and TPM.
+4) Boot the VM
+5) Copy over the `installer_clean_vm.ps1` script from this repo root.
+6) Open PowerShell as admin, and cd into where you dropped the script.
+7) Enable running of scripts on your VM via powershell `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
+8) Run `./installer_clean_vm.ps1` - this will initialise the folder structure required, pull down the static files, and enable debug mode and configure your VM for kernel debugging in WinDbg.
 
-Rust is suited to operate in embedded and kernel environments through [libcore no_std](https://doc.rust-lang.org/core/), and with Microsoft's support for developing drivers in Rust, Rust comes up as an excellent candidate for a "safer" approach to driver development. I use "safer" in quotes because, despite Rust's safety guarantees, we still need to interact with unsafe APIs within the OS.
+Now do the host instructions; we will return to the guest shortly.
 
-## Repo
+### Host
 
-The EDR code is logically separated in one solution into the kernel mode driver (the driver folder [found here](https://github.com/0xflux/sanctum/tree/master/driver)), the usermode engine ([found here](https://github.com/0xflux/sanctum/tree/master/um_engine)), and usermode DLL (todo).
+This is a little involved due to the signing process. But follow along and you should be good.
 
-## ELAM and ETW
+#### Building and signing the driver
 
-This project now contains **Early Launch AntiMalware** driver technology, **Protected Process Light: Antimalware**, and **Event Tracing for Windows: Threat Intelligence**. Those crates are contained in this repo as they are all part of the same project.
-They can be found:
+1) Ensure you have Visual Studio build tools installed
+2) Ensure you have this repo cloned
+3) Open Developer Command Prompt as Administrator (I'd recommend running `powershell` from this cmd prompt to upgrade to powershell)
+4) CD into the driver crate of this repo
+5) Run `.\cert.ps1` which will generate a ELAM compatible code signing certificate called `sanctum.pfx`. The cert will be located in the `driver` crate root.
+6) Run `cargo make` - this will build the driver.
+7) Run `.\sign.bat` - this will sign the driver.
+8) Run `certmgr.exe -v target\debug\sanctum_package\sanctum.sys` which will output the certificate information of the driver:
+   1) Look for the line (just on top of the half way point of the output) which has the heading: `Content Hash (To-Be-Signed Hash)::`.
+   2) Note the hash that is output beneath (will be 2 lines of bytes).
+   3) You want to concatenate these bytes into 1 long string. To see an example explanation, check my comment [here](https://github.com/0xflux/Sanctum/discussions/66#discussioncomment-13297486).
+   4) Open `driver/build.rs` in your favourite code editor, and change the hash from what is there in your cloned copy to the hash you concatenated in the step above, again, see the above link if that doesn't make sense.
+9) Run `cargo clean`.
+10) Run `cargo make`.
+11) Run `.\sign.bat`.
 
-- `elam_installer` - Installs the `ELAM` service
-- `sanctum_ppl_runner` - The `PPL` service 
-- `etw_consumer` = A child process that will be spawned from `sanctum_ppl_runner` which is able to consume `ETW: Threat Intelligence` thanks to `PPL`.
+#### Building and signing your PPL service
 
-# Usermode features
+Must be build in release mode to match the signing script - if you wanna build in debug mode make sure to edit `sign_ppl_runner.bat`.
 
-The usermode aspect of this application includes a GUI for you to use as a native windows program. 
+1) Continuing on from above, go up one dir with `cd ../`.
+2) Run: `cargo build --release -p sanctum_ppl_runner` - this will build the PPL service binary in `/target/release/`.
+3) Sign the service binary via running `.\sign_ppl_runner.bat`.
 
-## Process monitoring 
+#### Building the rest
 
-The EDR can monitor processes, tracking for signs of malicious activity in live time - currently the only supported tracking feature is 
-opening remote processes,
+(Feel free to build these in debug mode if you wish)
 
-## EDR DLL injection
+1) `cargo build --release -p elam_installer`
+2) `cargo build --release -p injected_dll`
+3) `cargo build --release -p um_engine`
+4) `cargo tauri build --debug`
 
-The EDR `um_engine` will inject a DLL into processes for internal  monitoring of the process.
+### Guest
 
-## EDR DLL syscall hooking
+Now to finish off, we want to move the binaries into the guest VM and run things!
 
-The EDR injected DLL hooks syscalls and redirects control to a function contained within the DLL for inspection.
-Via IPC, the DLL sends a message to the engine notifying it of the event, which then leads to my [Ghost Hunting](https://fluxsec.red/edr-syscall-hooking) 
-technique. 
+1) Move `um_engine.exe`, `elam_installer`, `app` (gui) into ~Desktop\sanctum
+2) Move `sanctum.sys`, `sanctum_ppl_runner.exe`, `sanctum.dll` into %AppData%\Sanctum
+3) In an admin powershell terminal:
+   1) cd ~Desktop\sanctum
+   2) `.\elam_installer.exe` - this should work and now prompt you to reboot.
+4) Reboot
+5) In an admin powershell terminal:
+   1) cd ~Desktop\sanctum
+   2) `.\elam_installer.exe` - this time no prompt to reboot
+   3) `sc.exe start sanctum_ppl_runner` - This should run your PPL service. If you have issues, check Event Viewer, or go to Services -> sanctum_ppl_runner and start it from there (may give more verbose error messages)
+6) Run um_engine as admin
+7) Run the GUI `app.exe` as admin
+8) Now you should be good to start the driver from the GUI if all went well!
 
-Example of hooked syscall:
+### Deployment problems
 
-![ZwOpenProcess](imgs/evidence/zwopenproc.png)
+If you have problems with the deployment process, please feel free to submit an issue or discussion and I will try help!
 
-And the function to which execution jumps in the DLL:
-
-![Syscall callback](imgs/evidence/hooked.png)
-
-Here's two videos on syscall hooking from this project:
-
-[![YouTube Video](https://img.youtube.com/vi/I2krfjCsRp0/0.jpg)](https://www.youtube.com/watch?v=I2krfjCsRp0)
-
-[![YouTube Video](https://img.youtube.com/vi/6cMPkwEsfvk/0.jpg)](https://www.youtube.com/watch?v=6cMPkwEsfvk)
-
-## Antivirus scanning for malware detection (IOC hash):
-
-Scanning a file:
-
-![File scanning](imgs/evidence/av_scan_file.gif)
-
-Scanning a folder:
-
-![File scanning](imgs/evidence/scan_folder.gif)
-
-# Driver features
-
-## Callback monitoring
-
-The driver monitors the creation of new processes, termination of processes, and process handles requested by applications. The driver will then
-send this data back up to the usermode application (`um_engine`) via IOCTL.
-
-# Additional info
-
-## Installation
-
-### Requirements:
+## Requirements:
 
 1) Cargo (obviously..).
 2) Nightly.
-3) For ELAM: From the developer command prompt:
-   1) `cargo make`.
-   2) `sign.bat` (This is important to sign the driver with the **custom** self signed cert for ETW access).
-   3) `sanctum_ppl_runner` AND `etw_consumer` must be built in **release mode**.
-   4) In the root sanctum, `sign_ppl_runner.bat` and `sign_etw_consumer.bat` needs running (from developer tools console) to sign the `sanctum_ppl_runner` AND `etw_consumer` binary with the **same** cert that signed the driver.
-4) Windows Driver Kit & Developer Console (as admin for building the driver).
-5) May wish to add a symlnk for .vscode/settings.json in the driver to that in the root for spelling etc.
-
-## Helpful notes:
-
-1) To see driver install config, regedit: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Sanctum.
-2) The app will create a location in %AppData% where the IOC file and settings are created. You will also need to drop the built driver into this location. A built driver is not shipped with this repo, so it must be built after cloned with cargo make from the driver directory.
-3) To use ETW:TI you must use a self signed cert with specific params. If this cert changes, need to recalculate the hash of it and apply it to the resources hash field in the build script, get this from `To-Be-Signed Hash` from `certmgr.exe -v target/debug/sanctum_package/sanctum.sys`.
+3) Windows Driver Kit & Developer Console (as admin for building the driver).
