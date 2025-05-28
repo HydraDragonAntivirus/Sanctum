@@ -7,7 +7,6 @@ use std::{
 };
 
 use logging::{EventID, event_log};
-use registry::create_event_source_key;
 use tracing::start_threat_intel_trace;
 use windows::{
     Win32::{
@@ -61,11 +60,6 @@ pub unsafe extern "system" fn ServiceMain(_: u32, _: *mut PWSTR) {
 fn run_service(h_status: SERVICE_STATUS_HANDLE) {
     unsafe {
         update_service_status(h_status, SERVICE_RUNNING.0);
-
-        //
-        // Ensure we have a registry key so we can write to the Windows Event Log
-        //
-        let _ = create_event_source_key();
 
         event_log(
             "Starting SanctumPPLRunner service.",

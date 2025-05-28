@@ -10,7 +10,7 @@ lto = true
 codegen-units = 1
 
 [dependencies]
-windows = {version = "0", features = [
+windows = {version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Services",
     "Win32_Security",
@@ -21,6 +21,7 @@ windows = {version = "0", features = [
     "Win32_System_Diagnostics_Etw",
     "Win32_System_Time",
     "Win32_System_ProcessStatus",
+    "Win32_UI_WindowsAndMessaging",
 ]}
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 shared_std ={ path = "../shared_std"}
