@@ -1,4 +1,4 @@
-use std::ptr::null_mut;
+use std::{process::exit, ptr::null_mut};
 
 use windows::{
     Win32::{
@@ -96,7 +96,13 @@ fn main() {
 
     let h_svc = match result {
         Ok(h) => h,
-        Err(e) => panic!("[!] Failed to create service. {e}"),
+        Err(e) => {
+            if e.code().0 as u32 == 0x80070431 {
+                println!("[+] PPL service configured, you can now run the service.");
+                exit(0)
+            }
+            panic!("[!] Failed to create service. {e}")
+        },
     };
 
     let mut info = SERVICE_LAUNCH_PROTECTED_INFO::default();
