@@ -17,6 +17,8 @@ me to teach the concepts to people interested in low level Windows system securi
 That said; as there is more attention on the project, please feel free to raise issues or use the discussions page as you wish. If you want some integrations, let me know
 and I will look at building those in!
 
+**N.B.** The project will be split up into the main branch (stable) and an experimental branch for development / things less than stable.
+
 #### Contents
 
 - [Structure](#structure)
