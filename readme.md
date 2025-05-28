@@ -19,6 +19,9 @@ and I will look at building those in!
 
 **N.B.** The project will be split up into the main branch (stable) and an experimental branch for development / things less than stable.
 
+I'd also recommend opening the driver crate at its crate level from the Developer Command Prompt (e.g. for VSCode: `code driver`) as I have noticed some issues with
+`Rust-Analyzer` if not opened in this way.
+
 #### Contents
 
 - [Structure](#structure)
