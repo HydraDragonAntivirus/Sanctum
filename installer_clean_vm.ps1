@@ -1,6 +1,13 @@
 # This script will configure a clean VM to have the right folders / required files which are statically pulled
 # from github.
 
+If (-not ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent() `
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error "This script must be run as Administrator. Exiting."
+    exit 1
+}
+
 # 1) Create %AppData%\Sanctum
 $appDataDir = Join-Path $env:APPDATA 'Sanctum'
 if (Test-Path $appDataDir) {
@@ -46,5 +53,10 @@ try {
     Write-Error "Failed to download file: $_"
     exit 1
 }
+
+Write-Host "Configuring BCD for test-signing and kernel debug..."
+bcdedit /set TESTSIGNING ON
+bcdedit /debug ON
+bcdedit /dbgsettings serial debugport:1 baudrate:115200
 
 Write-Host 'Clean VM setup complete. Created %AppData%\Sanctum and ~Desktop\sanctum. Please follow the remaining instructions to install.' -ForegroundColor Green
