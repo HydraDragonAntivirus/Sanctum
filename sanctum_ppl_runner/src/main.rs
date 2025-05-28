@@ -78,8 +78,8 @@ fn run_service(h_status: SERVICE_STATUS_HANDLE) {
             start_threat_intel_trace();
         });
 
-        // spawn child PPL
-        spawn_child_ppl_process();
+        // spawn child PPL - n.b. this is no longer used.
+        // spawn_child_ppl_process();
 
         // event loop
         while !SERVICE_STOP.load(Ordering::SeqCst) {

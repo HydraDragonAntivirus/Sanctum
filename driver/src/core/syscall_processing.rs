@@ -261,6 +261,7 @@ unsafe extern "C" fn syscall_post_processing_worker(_: *mut c_void) {
 
         println!("[sanctum] [THREAD] Worker queue sz {}", worker_queue.len());
 
+        // Processing this will be the entry into Ghost Hunting now for syscalls.
         for syscall in worker_queue {
             // todo
         }
