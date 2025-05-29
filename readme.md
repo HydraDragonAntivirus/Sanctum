@@ -17,10 +17,12 @@ me to teach the concepts to people interested in low level Windows system securi
 That said; as there is more attention on the project, please feel free to raise issues or use the discussions page as you wish. If you want some integrations, let me know
 and I will look at building those in!
 
-**N.B.** The project will be split up into the main branch (stable) and an experimental branch for development / things less than stable.
-
 I'd also recommend opening the driver crate at its crate level from the Developer Command Prompt (e.g. for VSCode: `code driver`) as I have noticed some issues with
 `Rust-Analyzer` if not opened in this way.
+
+&#128679; Please note: This project is not currently designed for mass consumption; you may encounter teething issues in the deploy process - you can raise an issue
+for me to fix; but I provide no guarantee it will work without issue on your deployment. This is a **POC project** first and foremost. There may be some bugs, or incomplete 
+features on the main branch as I develop it. For bugs, please raise an issue. Incomplete features will be in progress, so please do not raise issues for those. 
 
 #### Contents
 
