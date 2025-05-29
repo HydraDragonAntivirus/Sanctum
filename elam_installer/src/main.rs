@@ -255,7 +255,7 @@ fn to_wstring(s: &str) -> Vec<u16> {
 fn get_logged_on_user_or_panic() -> String {
     // Get the username of the logged on user; UNLEN symbol = 256, + 1 as per MSDN
     let logged_on_user = [0u16; 256 + 1];
-    let mut pcb_buf = size_of_val(&logged_on_user) as u32;
+    let mut pcb_buf = logged_on_user.len() as u32;
 
     let result = unsafe {
         GetUserNameW(
@@ -268,12 +268,8 @@ fn get_logged_on_user_or_panic() -> String {
         panic!("[-] Could not get logged on user. {e}. Error code: {pcb_buf}");
     }
 
-    match String::from_utf16_lossy(&logged_on_user).split_once('\0') {
-        Some(tup) => {
-            tup.0.to_string()
-        },
-        None => {
-            panic!("[-] Could not find null terminator in returned string. This path should never occur?");
-        },
-    }
+    // Use the returned count of TCHARS (num chars not bytes) -1 for the null to get a String of the 
+    // username
+    let snip = &logged_on_user[..(pcb_buf - 1) as usize];
+    String::from_utf16_lossy(&snip)
 }
