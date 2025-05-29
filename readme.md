@@ -28,8 +28,8 @@ features on the main branch as I develop it. For bugs, please raise an issue. In
 
 - [Structure](#structure)
 - [Features](#features)
-- [Deployment Instructions](#deployment-instructions)
 - [Requirements](#requirements)
+- [Deployment Instructions](#deployment-instructions)
 
 ## Structure
 
@@ -58,10 +58,23 @@ As a **summary** of features:
 - Detects rootkit tampering in the kernel
 - DLL injection of EDR (currently deprecated in favour of Alt Syscalls)
 
+## Requirements:
+
+1) Cargo (obviously..).
+2) Nightly.
+3) Windows Driver Kit & Developer Console (as admin for building the driver).
+4) Cargo make and LLVM tools, see [Microsoft's build instructions](https://github.com/microsoft/windows-drivers-rs) for installing these. 
+
 ## Deployment instructions
 
 The installation instructions are split between your **host** and **guest**. If you are having problems deploying this, please use the discussions page or raise and issue and I will 
 do my best to help / fix any bugs from the process.
+
+They are split into instructions for a host machine and a guest VM, this is because I advise against developing & building on your deployment VM (if the driver bricks your VM and it cant
+boot, then you will lose any development / environment specific setup [assuming no snapshots] that went into you being able to build this project).
+
+If you wish to build and deploy on the same machine (VM only to save your host), then I recommend 2 VM's; one to build, one to deploy, in which case, treat the host section below as your 2nd
+VM.
 
 As an overview, the driver must be built via `cargo make`, which is a pipeline provided by Microsoft in the Windows Drivers project. The remaining crates for this 
 project are built via `cargo build`.
@@ -139,9 +152,3 @@ Now to finish off, we want to move the binaries into the guest VM and run things
 ### Deployment problems
 
 If you have problems with the deployment process, please feel free to submit an issue or discussion and I will try help!
-
-## Requirements:
-
-1) Cargo (obviously..).
-2) Nightly.
-3) Windows Driver Kit & Developer Console (as admin for building the driver).
