@@ -63,7 +63,7 @@ As a **summary** of features:
 1) Cargo (obviously..).
 2) Nightly.
 3) Windows Driver Kit & Developer Console (as admin for building the driver).
-4) Cargo make and LLVM tools, see [Microsoft's build instructions](https://github.com/microsoft/windows-drivers-rs) for installing these. 
+4) Cargo make and LLVM tools, see [Microsoft's build instructions](https://github.com/microsoft/windows-drivers-rs?tab=readme-ov-file#build-requirements) for installing these. 
 
 ## Deployment instructions
 
