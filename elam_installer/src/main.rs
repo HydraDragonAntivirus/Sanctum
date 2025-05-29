@@ -1,7 +1,7 @@
 use std::{process::exit, ptr::null_mut};
 
 use windows::{
-    Win32::{
+    core::{s, Error, PCWSTR, PWSTR}, Win32::{
         Foundation::ERROR_SUCCESS,
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_READ_DATA, FILE_SHARE_READ, OPEN_EXISTING,
@@ -9,19 +9,17 @@ use windows::{
         System::{
             Antimalware::InstallELAMCertificateInfo,
             Registry::{
-                HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD, REG_OPENED_EXISTING_KEY,
-                REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegSetValueExW,
+                RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD, REG_OPENED_EXISTING_KEY, REG_OPTION_NON_VOLATILE, REG_SZ
             },
             Services::{
                 ChangeServiceConfig2W, CreateServiceW, OpenSCManagerW, SC_MANAGER_ALL_ACCESS,
                 SERVICE_CONFIG_LAUNCH_PROTECTED, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
                 SERVICE_LAUNCH_PROTECTED_ANTIMALWARE_LIGHT, SERVICE_LAUNCH_PROTECTED_INFO,
                 SERVICE_WIN32_OWN_PROCESS,
-            },
+            }, WindowsProgramming::GetUserNameW,
         },
-        UI::WindowsAndMessaging::{MB_ICONWARNING, MessageBoxA},
-    },
-    core::{Error, PCWSTR, PWSTR, s},
+        UI::WindowsAndMessaging::{MessageBoxA, MB_ICONWARNING},
+    }
 };
 
 fn main() {
@@ -31,13 +29,20 @@ fn main() {
     //
     println!("[i] Starting Elam installer..");
 
+    let username = get_logged_on_user_or_panic();
+
+    // The resulting buffer for a wide string conversion
     let mut path: Vec<u16> = vec![];
-    r"C:\Users\flux\AppData\Roaming\Sanctum\sanctum.sys"
+    // The formatted path including the users username
+    let path_with_username = format!(r"C:\Users\{}\AppData\Roaming\Sanctum\sanctum.sys", username);
+
+    // Encode the formatted string as utf16, into the path buffer
+    path_with_username
         .encode_utf16()
         .for_each(|c| path.push(c));
+
     path.push(0);
 
-    // todo un hanrdcode this
     let result = unsafe {
         CreateFileW(
             PCWSTR(path.as_ptr()),
@@ -236,4 +241,39 @@ fn to_wstring(s: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+/// Gets the username of the logged on user.
+/// 
+/// The function will obtain a wide string of the users logged in name and convert this to a string via
+/// [`String::from_utf16_lossy`] - it is possible for data loss during the conversion, but all characters Msft
+/// will accept should be valid. If not, then the program will panic at a later stage, but I do not anticipate this
+/// being an issue for the previously mentioned reason.
+/// 
+/// # Panics
+/// If this function cannot find the username of the currently logged on user, it will panic.
+fn get_logged_on_user_or_panic() -> String {
+    // Get the username of the logged on user; UNLEN symbol = 256, + 1 as per MSDN
+    let logged_on_user = [0u16; 256 + 1];
+    let mut pcb_buf = size_of_val(&logged_on_user) as u32;
+
+    let result = unsafe {
+        GetUserNameW(
+            Some(PWSTR(logged_on_user.as_ptr() as *mut _)), 
+            &mut pcb_buf,
+        )
+    };
+
+    if let Err(e) = result {
+        panic!("[-] Could not get logged on user. {e}. Error code: {pcb_buf}");
+    }
+
+    match String::from_utf16_lossy(&logged_on_user).split_once('\0') {
+        Some(tup) => {
+            tup.0.to_string()
+        },
+        None => {
+            panic!("[-] Could not find null terminator in returned string. This path should never occur?");
+        },
+    }
 }
