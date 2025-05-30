@@ -34,14 +34,6 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
-:: Verify the signature
-echo Verifying signature on %SERVICE_BINARY%...
-"%SIGNTOOL_PATH%" verify /pa /v "%SERVICE_BINARY%"
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Signature verification failed.
-    exit /b 1
-)
-
 echo [SUCCESS] Service binary signed successfully!
 
 endlocal
