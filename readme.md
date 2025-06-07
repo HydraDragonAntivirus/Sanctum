@@ -22,7 +22,9 @@ I'd also recommend opening the driver crate at its crate level from the Develope
 
 &#128679; Please note: This project is not currently designed for mass consumption; you may encounter teething issues in the deploy process - you can raise an issue
 for me to fix; but I provide no guarantee it will work without issue on your deployment. This is a **POC project** first and foremost. There may be some bugs, or incomplete 
-features on the main branch as I develop it. For bugs, please raise an issue. Incomplete features will be in progress, so please do not raise issues for those. 
+features on the main branch as I develop it. For bugs, please raise an issue. Incomplete features will be in progress, so please do not raise issues for those.
+
+Stuck trying to build / deploy this? I made a [YouTube video](https://www.youtube.com/watch?v=BFbz6ZjGitA) showing you how!
 
 #### Contents
 
