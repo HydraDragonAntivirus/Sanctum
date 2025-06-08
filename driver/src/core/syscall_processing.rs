@@ -36,15 +36,20 @@ static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
 pub struct NtAllocateVirtualMemory {
-    pub handle: *const c_void,
+    pub source_pid: u32,
+    pub dest_pid: u32,
     pub base_address: *const c_void,
     pub sz: usize,
     pub alloc_type: u32,
     pub protect_flags: u32,
 }
 
+pub struct NtOpenProcess {
+    target_pid: u32,
+}
+
 pub enum Syscall {
-    NtOpenProcess,
+    NtOpenProcess(NtOpenProcess),
     NtAllocateVirtualMemory(NtAllocateVirtualMemory),
 }
 

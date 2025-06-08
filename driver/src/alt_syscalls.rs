@@ -13,7 +13,7 @@ use core::{ffi::c_void, ptr::null_mut};
 use alloc::{boxed::Box, vec::Vec};
 use wdk::println;
 use wdk_sys::{
-    ntddk::{IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, RtlInitUnicodeString, ZwClose}, PsThreadType, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, HANDLE, KTRAP_FRAME, LIST_ENTRY, OBJ_KERNEL_HANDLE, PETHREAD, PHANDLE, PKTHREAD, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, UNICODE_STRING, _EPROCESS, _KTHREAD, _MODE::KernelMode
+    ntddk::{IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, PsGetProcessId, RtlInitUnicodeString, ZwClose}, PsProcessType, PsThreadType, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, HANDLE, KTRAP_FRAME, LIST_ENTRY, OBJ_KERNEL_HANDLE, PETHREAD, PHANDLE, PKTHREAD, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, UNICODE_STRING, _EPROCESS, _KTHREAD, _MODE::KernelMode
 };
 
 use crate::{
@@ -415,7 +415,7 @@ pub unsafe extern "system" fn syscall_handler(
     // todo need to dynamically resolve the syscall for symbol
     match ssn {
         SSN_NT_ALLOCATE_VIRTUAL_MEMORY => {
-            let rcx_handle = unsafe { *(args_base as *const *const c_void) };
+            let rcx_handle = unsafe { *(args_base as *const *const c_void) } as HANDLE;
             let rdx_base_addr = unsafe { *(args_base.add(0x8) as *const *const c_void) };
             let r8_zero_bit = unsafe { *(args_base.add(0x10) as *const *const usize) };
             let r9_sz = unsafe { **(args_base.add(0x18) as *const *const usize) };
@@ -424,8 +424,34 @@ pub unsafe extern "system" fn syscall_handler(
             let protect =
                 unsafe { *(rsp.add(ARG_5_STACK_OFFSET + 8) as *const _ as *const u32) } as u32;
 
+            let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+            let remote_pid = {
+                let mut ob: *mut c_void = null_mut();
+                _ = unsafe {
+                    ObReferenceObjectByHandle(
+                        rcx_handle, 
+                        PROCESS_ALL_ACCESS, 
+                        *PsProcessType, 
+                        KernelMode as _, 
+                        &mut ob,
+                        null_mut()
+                    )
+                };
+
+                let pid = unsafe { PsGetProcessId(ob as *mut _) } as u32;
+                unsafe {
+                    ObfDereferenceObject(ob);
+                }
+
+                pid
+            };
+
+            // todo
+            // for now we only care about remote memory allocations
+
             let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
-                handle: rcx_handle,
+                source_pid: current_pid,
+                dest_pid: remote_pid,
                 base_address: rdx_base_addr,
                 sz: r9_sz,
                 alloc_type,
@@ -433,18 +459,12 @@ pub unsafe extern "system" fn syscall_handler(
             });
 
             queue_syscall_post_processing(syscall_data);
-
-            // println!(
-            //     "[VirtualAllocEx] [i] handle: {:p}, base: {:p}, zero bit: {:p}, Size: {}, alloc_type: {:#x}, protect: {:#x}",
-            //     rcx_handle, rdx_base_addr, r8_zero_bit, r9_sz, alloc_type, protect
-            // );
         }
-        // SSN_NT_OPEN_PROCESS => {
-        //     println!(
-        //         "[NtOpenProcess] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
-        //         ssn, rcx, rsp
-        //     );
-        // }
+        SSN_NT_OPEN_PROCESS => {
+            let target_pid = unsafe { **(args_base.add(0x18) as *const *const u32) };
+            let current_pid = unsafe { PsGetCurrentProcessId() } as usize;
+            // println!("Og pid: {}, Target pid: {}", current_pid, target_pid);
+        }
         // 0x3a => {
         //     println!(
         //         "[Write virtual memory] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
