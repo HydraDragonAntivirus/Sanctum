@@ -3,11 +3,7 @@
 use core::{ffi::c_void, ptr::null_mut};
 
 use wdk_sys::{
-    _EVENT_TYPE::SynchronizationEvent,
-    DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, NTSTATUS,
-    OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PIO_STACK_LOCATION, PIRP, POBJECT_ATTRIBUTES,
-    PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG,
-    ntddk::{KeGetCurrentIrql, KeInitializeEvent},
+    ntddk::{KeGetCurrentIrql, KeInitializeEvent}, ACCESS_MASK, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE, PIO_STACK_LOCATION, PIRP, POBJECT_ATTRIBUTES, PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG, _EVENT_TYPE::SynchronizationEvent
 };
 
 pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
@@ -70,5 +66,24 @@ unsafe extern "system" {
         process_information: *mut c_void,
         len: ULONG,
         return_len: PULONG,
+    ) -> NTSTATUS;
+}
+
+unsafe extern "system" {
+    pub unsafe fn ZwGetNextProcess(
+        handle: HANDLE,
+        access: ACCESS_MASK,
+        attr: ULONG,
+        flags: ULONG,
+        new_proc_handle: PHANDLE,
+    ) -> NTSTATUS;
+
+    pub unsafe fn ZwGetNextThread(
+        proc_handle: HANDLE,
+        thread_handle: HANDLE,
+        access: ACCESS_MASK,
+        attr: ULONG,
+        flags: ULONG,
+        new_thread_handle: PHANDLE,
     ) -> NTSTATUS;
 }

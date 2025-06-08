@@ -8,24 +8,20 @@
 //! The mechanism of post processing [`queue_syscall_post_processing`] is using queued `wdk_mutex` and offloading the work to a system worker thread within
 //! the driver, as to not degrade system performance.
 
-use core::ffi::c_void;
+use core::{ffi::c_void, ptr::null_mut};
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use wdk::println;
 use wdk_sys::{
-    _EPROCESS, _KTHREAD,
-    DISPATCHER_HEADER, DRIVER_OBJECT, KTRAP_FRAME, LIST_ENTRY, PETHREAD, PKTHREAD,
-    ntddk::{
-        IoGetCurrentProcess, IoThreadToProcess,
-        PsGetCurrentProcessId,
-    },
+    ntddk::{IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, RtlInitUnicodeString, ZwClose}, PsThreadType, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, HANDLE, KTRAP_FRAME, LIST_ENTRY, OBJ_KERNEL_HANDLE, PETHREAD, PHANDLE, PKTHREAD, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, UNICODE_STRING, _EPROCESS, _KTHREAD, _MODE::KernelMode
 };
 
 use crate::{
-    core::syscall_processing::{KernelSyscallIntercept, NtAllocateVirtualMemory, Syscall, SyscallPostProcessor},
-    utils::{
+    core::syscall_processing::{
+        KernelSyscallIntercept, NtAllocateVirtualMemory, Syscall, SyscallPostProcessor,
+    }, ffi::{ZwGetNextProcess, ZwGetNextThread}, utils::{
         get_module_base_and_sz, scan_module_for_byte_pattern, thread_to_process_name, DriverError
-    },
+    }
 };
 
 const SLOT_ID: u32 = 0;
@@ -170,6 +166,7 @@ impl AltSyscalls {
         // Check if is pico process, if it is, we don't want to mess with it, as I haven't spent time reversing the branch
         // for this in PsSyscallProviderDispatch.
         let dispatch_hdr = unsafe { &mut *(p_k_thread as *mut DISPATCHER_HEADER) };
+
         if unsafe {
             dispatch_hdr
                 .__bindgen_anon_1
@@ -259,74 +256,118 @@ impl AltSyscalls {
             return;
         }
 
-        // Get the starting head for the list
-        let head = unsafe { (current_process as *mut u8).add(ACTIVE_PROCESS_LINKS_OFFSET) }
-            as *mut LIST_ENTRY;
-        let mut entry = unsafe { (*head).Flink };
+        //
+        // Walk the active processes & threads via reference counting to ensure that the 
+        // threads & processes aren't terminated during the walk (led to race condition).
+        // 
+        // For each process & thread, enable to relevant bits for Alt Syscalls.
+        //
 
-        while entry != head {
-            // Get the record for the _EPROCESS
-            let p_e_process =
-                unsafe { (entry as *mut u8).sub(ACTIVE_PROCESS_LINKS_OFFSET) } as *mut _EPROCESS;
+        let mut next_proc: HANDLE = null_mut();
+        let mut cur_proc: HANDLE = null_mut();
+        let mut cur_thread: HANDLE = null_mut();
+        let mut next_thread: HANDLE = null_mut();
 
-            let pid = unsafe {
-                let p = (p_e_process as *mut u8).add(UNIQUE_PROCESS_ID_OFFSET) as *const usize;
-                *p
-            };
+        // Store a vec of handles to be closed after we have completed all operations
+        let mut handles: Vec<HANDLE> = Vec::new();
 
-            // Skip the Idle process (PID 0) as there are no threads present and it gave a null ptr deref
-            if pid == 0 {
-                entry = unsafe { (*entry).Flink };
-                continue;
+        loop {
+            let result = unsafe { ZwGetNextProcess(
+                cur_proc,
+                PROCESS_ALL_ACCESS,
+                OBJ_KERNEL_HANDLE,
+                0,
+                &mut next_proc,
+            ) };
+
+            if result != 0 || cur_proc == next_proc {
+                break;
             }
 
-            // Walk threads
-            let thread_head =
-                unsafe { (p_e_process as *mut u8).add(THREAD_LIST_HEAD_OFFSET) } as *mut LIST_ENTRY;
-            let mut thread_entry = unsafe { (*thread_head).Flink };
+            cur_proc = next_proc;
 
-            while thread_entry != thread_head {
-                // Here we have each thread, we can now go and set the bit on the thread and process to make
-                // alt syscalls work
-                let p_k_thread = unsafe { (thread_entry as *mut u8).sub(THREAD_LIST_ENTRY_OFFSET) }
-                    as *mut _KTHREAD;
+            // Now walk the threads of the process
+            loop {
+                let result = unsafe { ZwGetNextThread(
+                    cur_proc,
+                    cur_thread,
+                    THREAD_ALL_ACCESS,
+                    OBJ_KERNEL_HANDLE,
+                    0,
+                    &mut next_thread
+                ) };
 
-                if let Some(proc_vec) = &isolated_processes {
-                    match thread_to_process_name(p_k_thread) {
-                        Ok(current_process_name) => {
-                            for needle in proc_vec.into_iter() {
-                                if current_process_name
-                                    .to_lowercase()
-                                    .contains(&needle.to_lowercase())
-                                {
-                                    println!(
-                                        "[sanctum] [+] Process name found for alt syscalls: {}",
-                                        needle
-                                    );
-                                    Self::configure_thread_for_alt_syscalls(p_k_thread, status);
-                                    Self::configure_process_for_alt_syscalls(p_k_thread);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!(
-                                "[sanctum] [-] Unable to get process name to set alt syscall bits on targeted process. {:?}",
-                                e
-                            );
-                            thread_entry = unsafe { (*thread_entry).Flink };
-                            continue;
-                        }
-                    }
+                if result != 0 || cur_thread == next_thread {
+                    break;
                 }
 
-                Self::configure_thread_for_alt_syscalls(p_k_thread, status);
-                Self::configure_process_for_alt_syscalls(p_k_thread);
+                cur_thread = next_thread;
 
-                thread_entry = unsafe { (*thread_entry).Flink };
+                let mut pe_thread: *mut c_void  = null_mut();
+
+                let _ = unsafe {
+                    ObReferenceObjectByHandle(
+                        cur_thread,
+                        THREAD_ALL_ACCESS,
+                        *PsThreadType,
+                        KernelMode as _,
+                        &mut pe_thread, 
+                        null_mut()
+                    )
+                };
+
+                if !pe_thread.is_null() {
+                    // Before we actually go ahead and set the bits; we wanna check whether the caller is requesting the bits
+                    // set ONLY on certain processes. The below logic will check whether that argument is Some, and if so,
+                    // check the process information to set the bits. 
+                    // If it is `None`, we will skip the check and just set all process & thread info
+
+                    if let Some(proc_vec) = &isolated_processes {
+                        match thread_to_process_name(pe_thread as *mut _) {
+                            Ok(current_process_name) => {
+                                for needle in proc_vec.into_iter() {
+                                    if current_process_name
+                                        .to_lowercase()
+                                        .contains(&needle.to_lowercase())
+                                    {
+                                        println!(
+                                            "[sanctum] [+] Process name found for alt syscalls: {}",
+                                            needle
+                                        );
+                                        Self::configure_thread_for_alt_syscalls(pe_thread as *mut _, status);
+                                        Self::configure_process_for_alt_syscalls(pe_thread as *mut _);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!(
+                                    "[sanctum] [-] Unable to get process name to set alt syscall bits on targeted process. {:?}",
+                                    e
+                                );
+                                let _ = unsafe { ObfDereferenceObject(pe_thread) };
+                                continue;
+                            }
+                        }
+                    }
+
+                    Self::configure_thread_for_alt_syscalls(pe_thread as *mut _, status);
+                    Self::configure_process_for_alt_syscalls(pe_thread as *mut _);
+
+                    let _ = unsafe { ObfDereferenceObject(pe_thread) };
+                }
+
+                handles.push(cur_thread);
             }
 
-            // Move on to the next process
-            entry = unsafe { (*entry).Flink };
+            // Reset so we can walk the threads again on the next process
+            cur_thread = null_mut();
+
+            handles.push(cur_proc);
+        }
+
+        // Close the handles to dec the ref count
+        for handle in handles {
+            let _ = unsafe { ZwClose(handle) };
         }
     }
 }
@@ -435,10 +476,7 @@ pub unsafe extern "system" fn syscall_handler(
 fn queue_syscall_post_processing(syscall: Syscall) {
     let pid = unsafe { PsGetCurrentProcessId() } as u64;
 
-    let parcel = KernelSyscallIntercept {
-        pid,
-        syscall,
-    };
+    let parcel = KernelSyscallIntercept { pid, syscall };
 
     SyscallPostProcessor::push(parcel);
 }
