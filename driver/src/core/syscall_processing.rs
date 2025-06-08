@@ -36,7 +36,6 @@ static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
 pub struct NtAllocateVirtualMemory {
-    pub source_pid: u32,
     pub dest_pid: u32,
     pub base_address: *const c_void,
     pub sz: usize,

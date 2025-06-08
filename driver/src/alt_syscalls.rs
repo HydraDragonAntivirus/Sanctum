@@ -416,13 +416,6 @@ pub unsafe extern "system" fn syscall_handler(
     match ssn {
         SSN_NT_ALLOCATE_VIRTUAL_MEMORY => {
             let rcx_handle = unsafe { *(args_base as *const *const c_void) } as HANDLE;
-            let rdx_base_addr = unsafe { *(args_base.add(0x8) as *const *const c_void) };
-            let r8_zero_bit = unsafe { *(args_base.add(0x10) as *const *const usize) };
-            let r9_sz = unsafe { **(args_base.add(0x18) as *const *const usize) };
-            let alloc_type =
-                unsafe { *(rsp.add(ARG_5_STACK_OFFSET) as *const _ as *const u32) } as u32;
-            let protect =
-                unsafe { *(rsp.add(ARG_5_STACK_OFFSET + 8) as *const _ as *const u32) } as u32;
 
             let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
             let remote_pid = {
@@ -448,9 +441,20 @@ pub unsafe extern "system" fn syscall_handler(
 
             // todo
             // for now we only care about remote memory allocations
+            if current_pid == remote_pid {
+                return 1;
+            }
+
+            let rdx_base_addr = unsafe { *(args_base.add(0x8) as *const *const c_void) };
+            let r8_zero_bit = unsafe { *(args_base.add(0x10) as *const *const usize) };
+            let r9_sz = unsafe { **(args_base.add(0x18) as *const *const usize) };
+            let alloc_type =
+                unsafe { *(rsp.add(ARG_5_STACK_OFFSET) as *const _ as *const u32) } as u32;
+            let protect =
+                unsafe { *(rsp.add(ARG_5_STACK_OFFSET + 8) as *const _ as *const u32) } as u32;
+
 
             let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
-                source_pid: current_pid,
                 dest_pid: remote_pid,
                 base_address: rdx_base_addr,
                 sz: r9_sz,
