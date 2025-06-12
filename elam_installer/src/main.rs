@@ -146,13 +146,20 @@ fn svc_name() -> Vec<u16> {
 }
 
 fn svc_bin_path() -> Vec<u16> {
-    let mut svc_path: Vec<u16> = vec![];
-    // todo not hardcode
-    r"C:\Users\flux\AppData\Roaming\Sanctum\sanctum_ppl_runner.exe"
+    let username = get_logged_on_user_or_panic();
+
+    // The resulting buffer for a wide string conversion
+    let mut path: Vec<u16> = vec![];
+    // The formatted path including the users username
+    let path_with_username = format!("C:\\Users\\{}\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe", username);
+
+    // Encode the formatted string as utf16, into the path buffer
+    path_with_username
         .encode_utf16()
-        .for_each(|c| svc_path.push(c));
-    svc_path.push(0);
-    svc_path
+        .for_each(|c| path.push(c));
+
+    path.push(0);
+    path
 }
 
 fn create_event_source_key() -> windows::core::Result<()> {
@@ -184,7 +191,8 @@ fn create_event_source_key() -> windows::core::Result<()> {
         }
 
         let value_name = to_wstring("EventMessageFile");
-        let exe_path = to_wstring(r"C:\Users\flux\AppData\Roaming\Sanctum\sanctum_ppl_runner.exe"); // todo dont hardcode in prod
+        let username = get_logged_on_user_or_panic();
+        let exe_path = to_wstring(&format!("C:\\Users\\{}\\AppData\\Roaming\\Sanctum\\sanctum_ppl_runner.exe", username));
 
         let exe_bytes: &[u8] = std::slice::from_raw_parts(
             exe_path.as_ptr() as *const u8,
