@@ -243,6 +243,11 @@ impl ProcessMonitor {
                 index += 1;
             }
         }
+
+        /// Adds an alertable syscall event to a process
+        pub fn add_alertable_syscall() {
+
+        }
     }
 
     pub fn handle_syscall_ghost_hunt_event(data: &Syscall) {
