@@ -152,6 +152,8 @@ Now to finish off, we want to move the binaries into the guest VM and run things
 7) Run the GUI `app.exe` as admin
 8) Now you should be good to start the driver from the GUI if all went well!
 
+**Important Note**: `elam_installer.exe` and starting the PPL needs to be run every reboot.
+
 ### Deployment problems
 
 If you have problems with the deployment process, please feel free to submit an issue or discussion and I will try help!
