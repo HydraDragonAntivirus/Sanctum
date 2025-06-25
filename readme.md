@@ -7,6 +7,9 @@ C required in this project baby!
 
 I'm documenting this project on my [blog](https://fluxsec.red/)!
 
+Currently, there are some features disabled (via comments, feel free to uncomment them to turn them back on) - this was due to some occasional random stability issues.
+I'm currently working on another project, but I will soon be turning my attention back to the EDR.
+
 Up until recently, the readme was in need of some tlc; given how fast the project has grown the readme was out of date and as time went on some fairly specific
 configuration requirements have arose. See the Deployment Instructions section for clear details on how to install the project **to a VM**. Do not deploy this 
 on your host machine, as we are tampering with the kernel (Windows 11), you may encounter system instability.
