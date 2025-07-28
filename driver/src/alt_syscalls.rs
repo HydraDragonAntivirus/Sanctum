@@ -8,18 +8,18 @@
 //! The mechanism of post processing [`queue_syscall_post_processing`] is using queued `wdk_mutex` and offloading the work to a system worker thread within
 //! the driver, as to not degrade system performance.
 
-use core::{ffi::c_void, ptr::null_mut};
+use core::{arch::asm, ffi::{c_void, CStr}, ptr::null_mut};
 
-use alloc::{boxed::Box, vec::Vec};
-use wdk::println;
+use alloc::{boxed::Box, string::String, vec::Vec};
+use wdk::{nt_success, println};
 use wdk_sys::{
-    ntddk::{IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, PsGetProcessId, RtlInitUnicodeString, ZwClose}, PsProcessType, PsThreadType, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, HANDLE, KTRAP_FRAME, LIST_ENTRY, OBJ_KERNEL_HANDLE, PETHREAD, PHANDLE, PKTHREAD, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, UNICODE_STRING, _EPROCESS, _KTHREAD, _MODE::KernelMode
+    ntddk::{IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, PsGetProcessId, RtlInitUnicodeString, ZwClose}, IoFileObjectType, PsProcessType, PsThreadType, DEVICE_OBJECT, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, FILE_ANY_ACCESS, FILE_DEVICE_KEYBOARD, FILE_OBJECT, HANDLE, KTRAP_FRAME, LIST_ENTRY, METHOD_BUFFERED, OBJECT_ATTRIBUTES, OBJ_KERNEL_HANDLE, PDEVICE_OBJECT, PETHREAD, PHANDLE, PKTHREAD, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, ULONG, UNICODE_STRING, _EPROCESS, _KTHREAD, _KTRAP_FRAME, _MODE::KernelMode
 };
 
 use crate::{
     core::syscall_processing::{
         KernelSyscallIntercept, NtAllocateVirtualMemory, Syscall, SyscallPostProcessor,
-    }, ffi::{ZwGetNextProcess, ZwGetNextThread}, utils::{
+    }, ffi::{PsGetProcessImageFileName, ZwGetNextProcess, ZwGetNextThread}, utils::{
         get_module_base_and_sz, scan_module_for_byte_pattern, thread_to_process_name, DriverError
     }
 };
@@ -29,6 +29,14 @@ const SSN_COUNT: usize = 0x500;
 
 const SSN_NT_OPEN_PROCESS: u32 = 0x26;
 const SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x18;
+
+const NT_OPEN_FILE: u32 = 0x0033;
+const NT_CREATE_SECTION: u32 = 0x004a;
+const NT_CREATE_SECTION_EX: u32 = 0x00c6;
+const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
+
+const NT_CREATE_FILE_SSN: u32 = 0x0055;
+const NT_TRACE_EVENT_SSN: u32 = 0x005e;
 
 pub struct AltSyscalls;
 
@@ -154,7 +162,7 @@ impl AltSyscalls {
         }
 
         // Enumerate all active processes and threads, and enable the relevant bits so that the alt syscall 'machine' can work :)
-        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Enable, None);
+        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Enable, Some(&["hello_world"]));
     }
 
     /// Sets the required context bits in memory on thread and KTHREAD.
@@ -225,7 +233,7 @@ impl AltSyscalls {
 
     /// Uninstall the Alt Syscall handlers from the kernel.
     pub fn uninstall() {
-        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Disable, None);
+        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Disable, Some(&["hello_world"]));
 
         // todo clean up the allocated memory
     }
@@ -400,7 +408,7 @@ pub unsafe extern "system" fn syscall_handler(
         return 1;
     }
 
-    let k_trap = unsafe { p3_home.sub(0x10) } as *const KTRAP_FRAME;
+    let k_trap = unsafe { p3_home.sub(0x10) } as *mut KTRAP_FRAME;
     if k_trap.is_null() {
         println!("[sanctum] [-] KTRAP_FRAME was null");
         return 1;
@@ -408,67 +416,72 @@ pub unsafe extern "system" fn syscall_handler(
 
     const ARG_5_STACK_OFFSET: usize = 0x28;
 
-    let k_trap = &unsafe { *k_trap };
+    let k_trap = &mut unsafe { *k_trap };
     let rsp = k_trap.Rsp as *const c_void;
-    let rcx = unsafe { *(args_base as *const _ as *const usize) } as usize;
 
     // todo need to dynamically resolve the syscall for symbol
     match ssn {
-        SSN_NT_ALLOCATE_VIRTUAL_MEMORY => {
-            let rcx_handle = unsafe { *(args_base as *const *const c_void) } as HANDLE;
-
-            let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
-            let remote_pid = {
-                let mut ob: *mut c_void = null_mut();
-                _ = unsafe {
-                    ObReferenceObjectByHandle(
-                        rcx_handle, 
-                        PROCESS_ALL_ACCESS, 
-                        *PsProcessType, 
-                        KernelMode as _, 
-                        &mut ob,
-                        null_mut()
-                    )
-                };
-
-                let pid = unsafe { PsGetProcessId(ob as *mut _) } as u32;
-                unsafe {
-                    ObfDereferenceObject(ob);
-                }
-
-                pid
-            };
-
-            // todo
-            // for now we only care about remote memory allocations
-            if current_pid == remote_pid {
-                return 1;
+        NT_TRACE_EVENT_SSN => {
+            if let Ok(val) = block_etw_write(ssn, args_base) {
+                return val;
             }
-
-            let rdx_base_addr = unsafe { *(args_base.add(0x8) as *const *const c_void) };
-            let r8_zero_bit = unsafe { *(args_base.add(0x10) as *const *const usize) };
-            let r9_sz = unsafe { **(args_base.add(0x18) as *const *const usize) };
-            let alloc_type =
-                unsafe { *(rsp.add(ARG_5_STACK_OFFSET) as *const _ as *const u32) } as u32;
-            let protect =
-                unsafe { *(rsp.add(ARG_5_STACK_OFFSET + 8) as *const _ as *const u32) } as u32;
-
-
-            let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
-                dest_pid: remote_pid,
-                base_address: rdx_base_addr,
-                sz: r9_sz,
-                alloc_type,
-                protect_flags: protect,
-            });
-
-            queue_syscall_post_processing(syscall_data);
         }
-        SSN_NT_OPEN_PROCESS => {
-            let target_pid = unsafe { **(args_base.add(0x18) as *const *const u32) };
-            let current_pid = unsafe { PsGetCurrentProcessId() } as usize;
-            // println!("Og pid: {}, Target pid: {}", current_pid, target_pid);
-        }
+
+        // SSN_NT_ALLOCATE_VIRTUAL_MEMORY => {
+        //     let rcx_handle = unsafe { *(args_base as *const *const c_void) } as HANDLE;
+
+        //     let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+        //     let remote_pid = {
+        //         let mut ob: *mut c_void = null_mut();
+        //         _ = unsafe {
+        //             ObReferenceObjectByHandle(
+        //                 rcx_handle, 
+        //                 PROCESS_ALL_ACCESS, 
+        //                 *PsProcessType, 
+        //                 KernelMode as _, 
+        //                 &mut ob,
+        //                 null_mut()
+        //             )
+        //         };
+
+        //         let pid = unsafe { PsGetProcessId(ob as *mut _) } as u32;
+        //         unsafe {
+        //             ObfDereferenceObject(ob);
+        //         }
+
+        //         pid
+        //     };
+
+        //     // todo
+        //     // for now we only care about remote memory allocations
+        //     if current_pid == remote_pid {
+        //         return 1;
+        //     }
+
+        //     let rdx_base_addr = unsafe { *(args_base.add(0x8) as *const *const c_void) };
+        //     let r8_zero_bit = unsafe { *(args_base.add(0x10) as *const *const usize) };
+        //     let r9_sz = unsafe { **(args_base.add(0x18) as *const *const usize) };
+        //     let alloc_type =
+        //         unsafe { *(rsp.add(ARG_5_STACK_OFFSET) as *const _ as *const u32) } as u32;
+        //     let protect =
+        //         unsafe { *(rsp.add(ARG_5_STACK_OFFSET + 8) as *const _ as *const u32) } as u32;
+
+
+        //     let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
+        //         dest_pid: remote_pid,
+        //         base_address: rdx_base_addr,
+        //         sz: r9_sz,
+        //         alloc_type,
+        //         protect_flags: protect,
+        //     });
+
+        //     queue_syscall_post_processing(syscall_data);
+        // }
+        // SSN_NT_OPEN_PROCESS => {
+        //     let target_pid = unsafe { **(args_base.add(0x18) as *const *const u32) };
+        //     let current_pid = unsafe { PsGetCurrentProcessId() } as usize;
+        //     // println!("Og pid: {}, Target pid: {}", current_pid, target_pid);
+        // }
         // 0x3a => {
         //     println!(
         //         "[Write virtual memory] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
@@ -547,4 +560,102 @@ fn lookup_global_table_address(_driver: &DRIVER_OBJECT) -> Result<*mut c_void, D
     println!("Address of PspServiceDescriptorGroupTable: {:p}", absolute);
 
     Ok(absolute as *mut _)
+}
+
+#[inline(always)]
+fn block_etw_write(
+    ssn: u32,
+    args_base: *const c_void,
+) -> Result<i32, ()> {
+
+    let proc_name = get_process_name().to_lowercase();
+
+    if proc_name.contains("hello_world") {
+        println!("Found hello world");
+
+        let mut rsp_val: u64 = 0;
+        
+        unsafe {
+            asm!(
+                "mov {out}, rsp",
+                out = out(reg) rsp_val,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+
+        // rsp + offset of stack frames calculated.
+        let trap_addr = (rsp_val + 0x540 + 0x210) as *mut _KTRAP_FRAME;
+
+        println!("Addr: {:p}", trap_addr);
+
+        let mut ktrap: _KTRAP_FRAME = unsafe { *trap_addr };
+        
+        // change the return value to usermode
+        unsafe { (*trap_addr).P3Home = 0xff };
+
+        // print the SSN
+        println!("RAX: {:X}", ktrap.Rax);
+
+        return Ok(0);
+    }
+
+    Ok(1)
+}
+
+
+#[inline(always)]
+fn get_process_name() -> String {
+    let mut pkthread: *mut c_void = null_mut();
+    
+    unsafe {
+        asm!(
+            "mov {}, gs:[0x188]",
+            out(reg) pkthread,
+        )
+    };
+    let p_eprocess = unsafe { IoThreadToProcess(pkthread as PETHREAD) } as *mut c_void;
+
+    let mut img = unsafe { PsGetProcessImageFileName(p_eprocess) } as *const u8;
+    let mut current_process_thread_name = String::new();
+    let mut counter: usize = 0;
+    while unsafe { core::ptr::read_unaligned(img) } != 0 || counter < 15 {
+        current_process_thread_name.push(unsafe { *img } as char);
+        img = unsafe { img.add(1) };
+        counter += 1;
+    }
+    
+    current_process_thread_name
+}
+
+#[inline(always)]
+fn get_object_name(args_base: *const c_void) -> Result<String, ()> {
+    let p_object_attributes = unsafe {
+        *( args_base.add(0x10) as *const *const OBJECT_ATTRIBUTES )
+    };
+
+    if p_object_attributes.is_null() || unsafe { MmIsAddressValid(p_object_attributes as *mut OBJECT_ATTRIBUTES as *mut c_void) } == 0 {
+        return Err(());
+    }
+
+    let oa: OBJECT_ATTRIBUTES = unsafe { *p_object_attributes };
+
+    if oa.ObjectName.is_null() {
+        return Err(());
+    }
+
+    let object_name = unsafe { *oa.ObjectName };
+    if unsafe { MmIsAddressValid(object_name.Buffer as *mut c_void) } == 0 {
+        return Err(());
+    }
+
+    let buf = object_name.Buffer;
+    let s = unsafe { core::slice::from_raw_parts(buf, (object_name.Length as usize) / 2) };
+    let object_name_string = match String::from_utf16(s) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(());
+        },
+    };
+
+    Ok(object_name_string)
 }
