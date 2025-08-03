@@ -2,18 +2,14 @@
 
 use core::{
     arch::asm,
-    ffi::{CStr, c_void},
+    ffi::c_void,
     ptr::null_mut,
-    str,
 };
 
-use wdk::{nt_success, println};
+use wdk::println;
 use wdk_sys::{
-    _KTHREAD, BOOLEAN, CLIENT_ID, DISPATCHER_HEADER, PROCESS_ALL_ACCESS,
-    ntddk::{
-        IoThreadToProcess, PsGetProcessId, PsLookupProcessByProcessId,
-        PsSetCreateThreadNotifyRoutine, ZwClose, ZwOpenProcess,
-    },
+    BOOLEAN,
+    ntddk::PsSetCreateThreadNotifyRoutine,
 };
 
 use crate::{
