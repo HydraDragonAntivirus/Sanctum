@@ -29,6 +29,12 @@ features on the main branch as I develop it. For bugs, please raise an issue. In
 
 Stuck trying to build / deploy this? I made a [YouTube video](https://www.youtube.com/watch?v=BFbz6ZjGitA) showing you how!
 
+### Limitations regarding Alt Syscalls on the driver
+
+Thanks to some testing by [Xacone](https://github.com/Xacone), we now know that **HVCI** prevents writing to the `PspServiceDescriptorGroupTable ` structure; so this technique is **blocked** by HVCI. From my own
+testing, it appears that this is still resistant to both PatchGuard and HyperGuard under VBS. I used [ssde](https://github.com/valinet/ssde/) to load my driver whilst Secure Boot and VBS were enabled, of which it is
+my understanding should be enough to test it against HyperGuard. This was done with debug mode off, which should also allow PatchGuard full authority to detect and block (BugCheck) the technique.
+
 #### Contents
 
 - [Structure](#structure)
