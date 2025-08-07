@@ -36,25 +36,6 @@ pub struct Engine;
 impl Engine {
     /// Start the engine
     pub async fn start() -> Result<(), Box<dyn std::error::Error>> {
-        // Get the PID of the PPL Service that should be running; if it is not running panic. This service is essential to
-        // the EDR. The service is not stoppable so its PID is valid for the duration of the lifetime of the engine.
-        // SAFETY: Assigning to the static is safe from the above rationale. This will be the only assignment made to the static,
-        // the program should never reassign the pid of the static other than here on initialisation.
-        unsafe {
-            let log = Log::new();
-            PPL_SERVICE_PID = match get_ppl_svc_pid() {
-                Ok(pid) => {
-                    log.log(
-                        LogLevel::Success,
-                        &format!("Found PID of PPL Service. {pid}"),
-                    );
-                    pid
-                }
-                Err(_) => {
-                    log.panic("Sanctum PPL Service not found. Are you sure it was started?");
-                }
-            }
-        };
 
         //
         // Start by instantiating the elements we will be using in the engine.

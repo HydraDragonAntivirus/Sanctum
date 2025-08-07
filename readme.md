@@ -49,12 +49,21 @@ my understanding should be enough to test it against HyperGuard. This was done w
 | driver | Contains the code for the Sanctum driver which is required for kernel monitoring |
 | um_engine | The usermode engine of the Sanctum application which communicates with the driver, running processes, and the GUI |
 | injected_dll | A DLL injected into all processes for EDR hooking (note that this is currently phased out, having being replaced with kernel-side hooking after I researched [Alt Syscalls for Windows 11](https://fluxsec.red/alt-syscalls-for-windows-11)). I will leave this in the project for legacy / blog post reasons, I have spent a lot of time hooking functions and writing about it on my blog, so good to keep in |
-| gui | A GUI for the Sanctum EDR, using Tauri for rendering |
-| etw_installer | The installer program for creating the ELAM PPL service (installs `sanctum_ppl_runner`) |
-| sanctum_ppl_runner | A ELAM signed Protected Process Light which monitors Events Tracing for Windows Threat Intelligence provider | 
+| gui | A GUI for the Sanctum EDR, using Tauri for rendering | 
 | shared_* | Shared crates for the project, both in `std` and `no_std` environments | 
 | server | Todo, this is to be the telemetry server which will receive signals from endpoints |
-| etw_consumer | Deprecated; sanctum_ppl_runner implements all required features this was intended to solve. Leaving in for learning reasons / linked to my blog post | 
+
+**Deprecated modules**
+
+The following modules (crates) were used in the project, and documented on my
+blog, but are now no longer required. If my setup guide refers to these, then
+you can swiftly disregard those parts.
+
+| Crate | Description | 
+| --- | --- |
+| etw_installer | The installer program for creating the ELAM PPL service (installs `sanctum_ppl_runner`) |
+| sanctum_ppl_runner | A ELAM signed Protected Process Light which monitors Events Tracing for Windows Threat Intelligence provider |
+| etw_consumer | Deprecated; sanctum_ppl_runner implements all required features this was intended to solve. Leaving in for learning reasons / linked to my blog post |
 
 ## Features
 

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub enum SyscallEventSource {
     EventSourceKernel = 0x1,
     EventSourceSyscallHook = 0x2,
-    EventSourceEtw = 0x4,
 }
 
 /// A wrapper for IPC messages sent by the injected DLL in all processes. This allows the same IPC interface to
@@ -45,26 +44,6 @@ pub enum NtFunction {
     NtAllocateVirtualMemory(Option<NtAllocateVirtualMemory>),
 }
 
-impl NtFunction {
-    /// Determines which API's can cancel out event signals
-    pub fn find_cancellable_apis_ghost_hunting(&self) -> isize {
-        match self {
-            NtFunction::NtOpenProcess(_) => {
-                SyscallEventSource::EventSourceKernel as isize
-                    | SyscallEventSource::EventSourceSyscallHook as isize
-            }
-            NtFunction::NtWriteVirtualMemory(_) => {
-                SyscallEventSource::EventSourceEtw as isize
-                    | SyscallEventSource::EventSourceSyscallHook as isize
-            }
-            NtFunction::NtAllocateVirtualMemory(_) => {
-                SyscallEventSource::EventSourceEtw as isize
-                    | SyscallEventSource::EventSourceSyscallHook as isize
-            }
-        }
-    }
-}
-
 /// todo docs
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NtOpenProcessData {
@@ -79,17 +58,6 @@ pub struct NtWriteVirtualMemoryData {
     pub buf_len: usize,
 }
 
-impl Syscall {
-    /// Creates a new Syscall data packet where the source is from the ETW module
-    pub fn new_etw(pid: u64, nt_function: NtFunction, evasion_weight: i16) -> Self {
-        Self {
-            nt_function,
-            pid,
-            source: SyscallEventSource::EventSourceEtw,
-            evasion_weight,
-        }
-    }
-}
 
 unsafe impl Send for Syscall {}
 

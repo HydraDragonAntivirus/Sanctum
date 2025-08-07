@@ -59,16 +59,10 @@ impl Core {
         //     .extend_processes(snapshot_processes);
 
         let (tx, mut rx) = mpsc::channel(1000);
-        let (tx_etw, mut rx_etw) = mpsc::channel(1000);
 
         // Start the IPC server for the injected DLL to communicate with the core
         tokio::spawn(async {
             run_ipc_for_injected_dll(tx).await;
-        });
-
-        // Start the IPC server for the ETW consumer
-        tokio::spawn(async {
-            run_ipc_for_etw(tx_etw).await;
         });
 
         //
@@ -78,12 +72,6 @@ impl Core {
         loop {
             // See if there is a message from the injected DLL
             if let Ok(rx) = rx.try_recv() {
-                let mut mtx = driver_manager.lock().await;
-                mtx.ioctl_syscall_event(rx);
-            }
-
-            // Check for events from the ETW listener
-            if let Ok(rx) = rx_etw.try_recv() {
                 let mut mtx = driver_manager.lock().await;
                 mtx.ioctl_syscall_event(rx);
             }

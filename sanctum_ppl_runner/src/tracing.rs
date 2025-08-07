@@ -309,11 +309,11 @@ unsafe extern "system" fn trace_callback(record: *mut EVENT_RECORD) {
                 EVENTLOG_SUCCESS,
                 EventID::ProcessOfInterestTI,
             );
-            send_etw_info_ipc(Syscall::new_etw(
-                pid as u64,
-                NtFunction::NtAllocateVirtualMemory(None),
-                60,
-            ));
+            // send_etw_info_ipc(Syscall::new_etw(
+            //     pid as u64,
+            //     NtFunction::NtAllocateVirtualMemory(None),
+            //     60,
+            // ));
         }
 
         if keyword & KERNEL_THREATINT_KEYWORD_PROTECTVM_LOCAL
@@ -351,21 +351,21 @@ unsafe extern "system" fn trace_callback(record: *mut EVENT_RECORD) {
                 EVENTLOG_SUCCESS,
                 EventID::ProcessOfInterestTI,
             );
-            send_etw_info_ipc(Syscall::new_etw(
-                pid as u64,
-                NtFunction::NtWriteVirtualMemory(None),
-                60,
-            ));
+            // send_etw_info_ipc(Syscall::new_etw(
+            //     pid as u64,
+            //     NtFunction::NtWriteVirtualMemory(None),
+            //     60,
+            // ));
         }
 
         if keyword & KERNEL_THREATINT_KEYWORD_WRITEVM_REMOTE
             == KERNEL_THREATINT_KEYWORD_WRITEVM_REMOTE
         {
-            send_etw_info_ipc(Syscall::new_etw(
-                pid as u64,
-                NtFunction::NtWriteVirtualMemory(None),
-                60,
-            ));
+            // send_etw_info_ipc(Syscall::new_etw(
+            //     pid as u64,
+            //     NtFunction::NtWriteVirtualMemory(None),
+            //     60,
+            // ));
             event_log(
                 &format!(
                     "Write remote memory for pid: {}, image: {}, FLAGS: {:b}, Data: {:?}, keyword - bin: {:b} hex: {:X}",
