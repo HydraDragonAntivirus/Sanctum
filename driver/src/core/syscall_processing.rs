@@ -11,16 +11,16 @@ use core::{
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 use wdk::{nt_success, println};
 use wdk_mutex::{
-    fast_mutex::{FastMutex, FastMutexGuard},
+    fast_mutex::FastMutexGuard,
     grt::Grt,
 };
 use wdk_sys::{
     ntddk::{
-        IoFreeWorkItem, KeDelayExecutionThread, KeWaitForSingleObject, ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, PsGetCurrentProcessId, PsTerminateSystemThread
-    }, CLIENT_ID, FALSE, HANDLE, KTRAP_FRAME, LARGE_INTEGER, OBJECT_ATTRIBUTES, PIO_WORKITEM, PVOID, STATUS_SUCCESS, THREAD_ALL_ACCESS, _CLFS_LOG_ARCHIVE_MODE::ClfsLogArchiveEnabled, _KWAIT_REASON::Executive, _MODE::KernelMode
+        KeDelayExecutionThread, KeWaitForSingleObject, ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, PsGetCurrentProcessId, PsTerminateSystemThread
+    }, CLIENT_ID, FALSE, HANDLE, KTRAP_FRAME, LARGE_INTEGER, STATUS_SUCCESS, THREAD_ALL_ACCESS, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
-use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS}, utils::{get_process_name, handle_to_pid, DriverError}};
+use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS}, utils::{handle_to_pid, DriverError}};
 
 /// Indicates whether the [`SyscallPostProcessor`] system is active or not. Active == true.
 /// Using a static atomic as we cannot explicitly get a handle to a SyscallPostProcessor if it does not
@@ -41,6 +41,7 @@ pub struct NtAllocateVirtualMemory {
 
 pub struct NtOpenProcess {
     target_pid: u32,
+    acces_mask: u32,
 }
 
 pub enum Syscall {
@@ -92,9 +93,21 @@ impl KernelSyscallIntercept {
         let remote_pid = client_id.UniqueProcess as u32;
         let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
 
-        println!("Current pid: {current_pid}, remote pid: {remote_pid}");
+        // Currently only interested in foreign process handles
+        if remote_pid == current_pid {
+            return None;
+        }
+
+        let access_mask = ktrap_frame.Rdx as u32;
         
-        None
+        Some(
+            Syscall::NtOpenProcess(
+                NtOpenProcess { 
+                    target_pid: remote_pid, 
+                    acces_mask: access_mask,
+                }
+            )
+        )
     }
 
     fn nt_allocate_vm(

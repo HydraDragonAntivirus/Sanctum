@@ -94,19 +94,19 @@ pub unsafe extern "C" fn process_create_callback(
             pid,
         };
 
-        // if process_started.image_name.contains("otepad")
-        //     || process_started.image_name.contains("alware.ex")
-        // {
-        //     println!(
-        //         "[sanctum] [i] Notepad created, pid: {}, ppid: {}",
-        //         pid, parent_pid
-        //     );
+        if process_started.image_name.contains("otepad")
+            || process_started.image_name.contains("alware.ex")
+        {
+            println!(
+                "[sanctum] [i] Process of interest created, pid: {}, ppid: {}",
+                pid, parent_pid
+            );
 
-        //     // todo this is buggy af
-        //     if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
-        //         println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
-        //     };
-        // }
+            // todo this is buggy af ?
+            if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
+                println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
+            };
+        }
 
         // Attempt to dereference the DRIVER_MESSAGES global; if the dereference is successful,
         // add the relevant data to the queue
@@ -284,7 +284,7 @@ extern "C" fn image_load_callback(
     pid: HANDLE,
     image_info: *mut _IMAGE_INFO,
 ) {
-    return;
+
     // todo can i use this callback in an attempt to detect DLL SOH?? :)
 
     // I guess these should never be null
@@ -357,7 +357,7 @@ extern "C" fn image_load_callback(
     }
 
     println!(
-        "Adding process: {:?}, pid: {}, base: {:p} to ImageLoadQueueForInjector",
+        "Adding process: {:?}, pid: {}, base: {:p} to ImageLoadQueueForInjector to inject our dll!",
         name, pid as usize, image_info.ImageBase
     );
 
