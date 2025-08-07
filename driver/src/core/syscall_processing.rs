@@ -9,6 +9,7 @@ use core::{
 };
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use shared_no_std::ghost_hunting::{NtAllocateVirtualMemory, NtOpenProcess};
 use wdk::{nt_success, println};
 use wdk_mutex::{
     fast_mutex::FastMutexGuard,
@@ -30,19 +31,6 @@ static SYSCALL_PP_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// allows the thread to terminate itself.
 static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
-
-pub struct NtAllocateVirtualMemory {
-    pub dest_pid: u32,
-    pub base_address: *const c_void,
-    pub sz: usize,
-    pub alloc_type: u32,
-    pub protect_flags: u32,
-}
-
-pub struct NtOpenProcess {
-    target_pid: u32,
-    acces_mask: u32,
-}
 
 pub enum Syscall {
     NtOpenProcess(NtOpenProcess),
@@ -136,7 +124,7 @@ impl KernelSyscallIntercept {
         
         let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
             dest_pid,
-            base_address,
+            base_address: base_address as usize,
             sz,
             alloc_type,
             protect_flags,

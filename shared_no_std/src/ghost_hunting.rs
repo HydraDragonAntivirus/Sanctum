@@ -79,23 +79,6 @@ pub struct NtWriteVirtualMemoryData {
     pub buf_len: usize,
 }
 
-/// todo docs
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct NtAllocateVirtualMemory {
-    /// The base address is the base of the remote process which is stored as a usize but is actually a hex
-    /// address and will need converting if using as an address.
-    pub base_address: usize,
-    /// THe size of the allocated memory
-    pub region_size: usize,
-    /// A bitmask containing flags that specify the type of allocation to be performed.
-    pub allocation_type: u32,
-    /// A bitmask containing page protection flags that specify the protection desired for the committed
-    /// region of pages.
-    pub protect: u32,
-    /// The pid in which the allocation is taking place in
-    pub remote_pid: u32,
-}
-
 impl Syscall {
     /// Creates a new Syscall data packet where the source is from the ETW module
     pub fn new_etw(pid: u64, nt_function: NtFunction, evasion_weight: i16) -> Self {
@@ -109,3 +92,18 @@ impl Syscall {
 }
 
 unsafe impl Send for Syscall {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct NtAllocateVirtualMemory {
+    pub dest_pid: u32,
+    pub base_address: usize,
+    pub sz: usize,
+    pub alloc_type: u32,
+    pub protect_flags: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct NtOpenProcess {
+    pub target_pid: u32,
+    pub acces_mask: u32,
+}

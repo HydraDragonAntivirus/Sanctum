@@ -17,10 +17,10 @@ use wdk_sys::{
 };
 
 use crate::{
-    core::syscall_processing::{
-        KernelSyscallIntercept, NtAllocateVirtualMemory, Syscall, SyscallPostProcessor,
-    }, ffi::{PsGetProcessImageFileName, ZwGetNextProcess, ZwGetNextThread}, utils::{
-        get_module_base_and_sz, get_process_name, handle_to_pid, scan_module_for_byte_pattern, thread_to_process_name, DriverError
+    core::syscall_processing::
+        KernelSyscallIntercept
+    , ffi::{ZwGetNextProcess, ZwGetNextThread}, utils::{
+        get_module_base_and_sz, get_process_name, scan_module_for_byte_pattern, thread_to_process_name, DriverError
     }
 };
 

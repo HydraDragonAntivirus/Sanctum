@@ -99,10 +99,10 @@ unsafe extern "system" fn virtual_alloc_ex(
         let data = DLLMessage::SyscallWrapper(Syscall {
             nt_function: NtFunction::NtAllocateVirtualMemory(Some(NtAllocateVirtualMemory {
                 base_address: base_address as usize,
-                region_size: region_size_checked,
-                allocation_type,
-                protect,
-                remote_pid,
+                dest_pid: remote_pid,
+                sz: region_size_checked,
+                alloc_type: allocation_type,
+                protect_flags: protect,
             })),
             pid: pid as u64,
             source: SyscallEventSource::EventSourceSyscallHook,
