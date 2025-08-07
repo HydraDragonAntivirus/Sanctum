@@ -1,9 +1,5 @@
 use core::{
-    ffi::{CStr, c_void},
-    iter::once,
-    ptr::null_mut,
-    slice::from_raw_parts,
-    sync::atomic::Ordering,
+    arch::asm, ffi::{c_void, CStr}, iter::once, ptr::null_mut, slice::from_raw_parts, sync::atomic::Ordering
 };
 
 use alloc::{
@@ -15,15 +11,9 @@ use alloc::{
 use shared_no_std::constants::SanctumVersion;
 use wdk::println;
 use wdk_sys::{
-    _EPROCESS, _KPROCESS, _KTHREAD, DRIVER_OBJECT, FALSE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL,
-    FILE_OPEN_IF, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT, GENERIC_WRITE,
-    IO_STATUS_BLOCK, LIST_ENTRY, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES,
-    PASSIVE_LEVEL, PHANDLE, POBJECT_ATTRIBUTES, PVOID, STATUS_SUCCESS, STRING, ULONG,
-    UNICODE_STRING,
     ntddk::{
-        IoThreadToProcess, KeGetCurrentIrql, PsGetProcessId, RtlInitUnicodeString,
-        RtlUnicodeStringToAnsiString, ZwClose, ZwCreateFile, ZwWriteFile,
-    },
+        IoThreadToProcess, KeGetCurrentIrql, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetProcessId, RtlInitUnicodeString, RtlUnicodeStringToAnsiString, ZwClose, ZwCreateFile, ZwWriteFile
+    }, PsProcessType, DRIVER_OBJECT, FALSE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_OPEN_IF, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, LIST_ENTRY, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PASSIVE_LEVEL, PETHREAD, PHANDLE, POBJECT_ATTRIBUTES, PROCESS_ALL_ACCESS, PVOID, STATUS_SUCCESS, STRING, ULONG, UNICODE_STRING, _EPROCESS, _KPROCESS, _KTHREAD, _MODE::KernelMode
 };
 
 use crate::{
@@ -458,4 +448,51 @@ impl<'a> Log<'a> {
             );
         }
     }
+}
+
+/// Converts a valid HANDLE to a process ID
+pub fn handle_to_pid(handle: HANDLE) -> u32 {
+    let mut ob: *mut c_void = null_mut();
+    _ = unsafe {
+        ObReferenceObjectByHandle(
+            handle, 
+            PROCESS_ALL_ACCESS, 
+            *PsProcessType, 
+            KernelMode as _, 
+            &mut ob,
+            null_mut()
+        )
+    };
+
+    let pid = unsafe { PsGetProcessId(ob as *mut _) } as u32;
+    unsafe {
+        ObfDereferenceObject(ob);
+    }
+
+    pid
+}
+
+/// Returns up to 15 characters of the process name of the **current thread**. Note, the returned process
+/// name is case **insensitive**.
+pub fn get_process_name() -> String {
+    let mut pkthread: *mut c_void = null_mut();
+    
+    unsafe {
+        asm!(
+            "mov {}, gs:[0x188]",
+            out(reg) pkthread,
+        )
+    };
+    let p_eprocess = unsafe { IoThreadToProcess(pkthread as PETHREAD) } as *mut c_void;
+
+    let mut img = unsafe { PsGetProcessImageFileName(p_eprocess) } as *const u8;
+    let mut current_process_thread_name = String::new();
+    let mut counter: usize = 0;
+    while unsafe { core::ptr::read_unaligned(img) } != 0 || counter < 15 {
+        current_process_thread_name.push(unsafe { *img } as char);
+        img = unsafe { img.add(1) };
+        counter += 1;
+    }
+    
+    current_process_thread_name
 }

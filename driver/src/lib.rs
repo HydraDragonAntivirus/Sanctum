@@ -147,8 +147,10 @@ fn initialise_sanctum(driver: &mut DRIVER_OBJECT) -> Result<(), i32> {
     // Thread interception
     set_thread_creation_callback();
 
+    // todo this isnt actually doing anything?
     ProcessMonitor::start_ghost_hunt_monitor();
 
+    // todo this is just a ret after the callback is registered...
     let status = register_image_load_callback();
     if !nt_success(status) {
         println!("[sanctum] [-] Could not start PsSetLoadImageNotifyRoutine. Status: {status}");
@@ -157,6 +159,7 @@ fn initialise_sanctum(driver: &mut DRIVER_OBJECT) -> Result<(), i32> {
     }
 
     // Intercepting process creation
+    // todo this is a mess
     let res =
         unsafe { PsSetCreateProcessNotifyRoutineEx(Some(process_create_callback), FALSE as u8) };
     if res != STATUS_SUCCESS {
@@ -168,6 +171,7 @@ fn initialise_sanctum(driver: &mut DRIVER_OBJECT) -> Result<(), i32> {
     }
 
     // Requests for a handle
+    // todo right now the result is just a ret
     if let Err(e) = ProcessHandleCallback::register_callback() {
         driver_exit(driver); // cleanup any resources before returning
         return Err(e);

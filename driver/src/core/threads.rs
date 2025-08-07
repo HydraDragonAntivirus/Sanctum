@@ -62,13 +62,6 @@ pub fn thread_reg_alt_callbacks() {
         },
     };
 
-    for needle in ["hello_world"] {
-        if thread_process_name.contains(&needle.to_lowercase()) {
-            AltSyscalls::configure_thread_for_alt_syscalls(ke_thread as *mut _, AltSyscallStatus::Enable);
-            AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
-        }
-    }
-
-    // AltSyscalls::configure_thread_for_alt_syscalls(ke_thread as *mut _, AltSyscallStatus::Enable);
-    // AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
+    AltSyscalls::configure_thread_for_alt_syscalls(ke_thread as *mut _, AltSyscallStatus::Enable);
+    AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
 }

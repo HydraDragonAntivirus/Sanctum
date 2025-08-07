@@ -15,16 +15,12 @@ use wdk_mutex::{
     grt::Grt,
 };
 use wdk_sys::{
-    _KWAIT_REASON::Executive,
-    _MODE::KernelMode,
-    FALSE, HANDLE, LARGE_INTEGER, PIO_WORKITEM, PVOID, STATUS_SUCCESS, THREAD_ALL_ACCESS,
     ntddk::{
-        IoFreeWorkItem, KeDelayExecutionThread, KeWaitForSingleObject, ObReferenceObjectByHandle,
-        ObfDereferenceObject, PsCreateSystemThread, PsTerminateSystemThread,
-    },
+        IoFreeWorkItem, KeDelayExecutionThread, KeWaitForSingleObject, ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, PsGetCurrentProcessId, PsTerminateSystemThread
+    }, CLIENT_ID, FALSE, HANDLE, KTRAP_FRAME, LARGE_INTEGER, OBJECT_ATTRIBUTES, PIO_WORKITEM, PVOID, STATUS_SUCCESS, THREAD_ALL_ACCESS, _CLFS_LOG_ARCHIVE_MODE::ClfsLogArchiveEnabled, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
-use crate::utils::DriverError;
+use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS}, utils::{get_process_name, handle_to_pid, DriverError}};
 
 /// Indicates whether the [`SyscallPostProcessor`] system is active or not. Active == true.
 /// Using a static atomic as we cannot explicitly get a handle to a SyscallPostProcessor if it does not
@@ -55,6 +51,86 @@ pub enum Syscall {
 pub struct KernelSyscallIntercept {
     pub pid: u64,
     pub syscall: Syscall,
+}
+
+impl KernelSyscallIntercept {
+    /// Creates a new [`KernelSyscallIntercept`] from an intercepted Alt Syscall,
+    /// and pushes the captured data straight onto the queue for [`SyscallPostProcessor`]
+    /// which deals with processing of system calls.
+    pub fn from_alt_syscall(
+        ktrap_frame: KTRAP_FRAME,
+    ) {
+
+        //
+        // We want to match here on the SSN, and process each SSN as appropriate for 
+        // our hooking needs.
+        //
+
+        let syscall_data: Option<Syscall> = match ktrap_frame.Rax as u32 {
+            SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Self::nt_allocate_vm(ktrap_frame),
+            SSN_NT_OPEN_PROCESS => Self::nt_open_process(ktrap_frame),
+            _ => {
+                println!("[-] [sanctum] Unknown SSN received, {:?}", ktrap_frame.Rax as u32);
+                None
+            }
+        };
+
+        // Push the data onto the queue for processing
+        if let Some(syscall_data) = syscall_data {
+            SyscallPostProcessor::push(syscall_data);
+        }
+    }
+
+    fn nt_open_process(
+        ktrap_frame: KTRAP_FRAME,
+    ) -> Option<Syscall> {
+        
+        let client_id: CLIENT_ID = unsafe { 
+            *(ktrap_frame.R9 as *const CLIENT_ID)
+        };
+
+        let remote_pid = client_id.UniqueProcess as u32;
+        let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+
+        println!("Current pid: {current_pid}, remote pid: {remote_pid}");
+        
+        None
+    }
+
+    fn nt_allocate_vm(
+        ktrap_frame: KTRAP_FRAME,
+    ) -> Option<Syscall> {
+        let proc_handle = ktrap_frame.Rcx as HANDLE;
+
+        let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+        let dest_pid = handle_to_pid(proc_handle);
+
+        // for now we only care about remote memory allocations
+        if current_pid == dest_pid {
+            return None;
+        }
+
+        let base_address = ktrap_frame.Rdx as *const c_void;
+        let sz = ktrap_frame.R9 as usize;
+
+        // Get the stack args, starting at an offset of 5 (pointer sz)
+        let alloc_type = unsafe { 
+            *((ktrap_frame.Rsp as *const usize).add(5) as *const u32) 
+        };
+        let protect_flags = unsafe { 
+            *((ktrap_frame.Rsp as *const usize).add(6) as *const u32) 
+        };
+        
+        let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
+            dest_pid,
+            base_address,
+            sz,
+            alloc_type,
+            protect_flags,
+        });
+
+        Some(syscall_data)
+    }
 }
 
 pub struct SyscallPostProcessor;
@@ -92,10 +168,16 @@ impl SyscallPostProcessor {
         Ok(())
     }
 
-    pub fn push(syscall_data: KernelSyscallIntercept) {
+    /// Pushes a [`KernelSyscallIntercept`] item onto the current queue for processing. This
+    /// is the primary method of offloading system call data as to not block the main syscall
+    /// dispatcher.
+    pub fn push(syscall: Syscall) {
         if SYSCALL_PP_ACTIVE.load(Ordering::SeqCst) == false {
             return;
         }
+
+        let pid = unsafe { PsGetCurrentProcessId() } as u64;
+        let syscall_data = KernelSyscallIntercept { pid, syscall };
 
         let mut lock: FastMutexGuard<VecDeque<KernelSyscallIntercept>> =
             match Grt::get_fast_mutex("alt_syscall_event_queue") {
@@ -226,55 +308,60 @@ unsafe extern "C" fn syscall_post_processing_worker(_: *mut c_void) {
             break;
         }
 
-        //
-        // Drain the active queue into the worker queue, so we can start doing work on it without
-        // causing contention of the queue that will be being pushed to with heavy load.
-        // We can drain the queue within a new scope so RAII releases the mutex so syscalls can start operating
-        // again. This section needs to be QUICK.
-        //
-        let worker_queue = {
-            let mut lock: FastMutexGuard<VecDeque<KernelSyscallIntercept>> =
-                match Grt::get_fast_mutex("alt_syscall_event_queue") {
-                    Ok(lock) => match lock.lock() {
-                        Ok(lock) => lock,
-                        Err(e) => {
-                            println!(
-                                "[sanctum] [-] Could not lock alt_syscall_event_queue. {:?}",
-                                e
-                            );
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        println!(
-                            "[sanctum] [-] Could not lock get FM: alt_syscall_event_queue. {:?}",
-                            e
-                        );
-                        continue;
-                    }
-                };
+        let _ =
+            unsafe { KeDelayExecutionThread(KernelMode as _, FALSE as _, &mut thread_sleep_time) };
 
-            if lock.is_empty() {
-                continue;
-            }
-
-            // This will take ownership of the data held by the lock, whilst clearing the VecDeq back to its
-            // original Default value.
-            mem::take(&mut *lock)
+        //
+        // Extract any Alt Syscall intercepted queued items which need to go through
+        // processing.
+        //
+        // If there are None, then go back to the start of the threads loop.
+        //
+        let worker_queue = match extract_queued_items() {
+            Some(w) => w,
+            None => continue,
         };
 
         println!("[sanctum] [THREAD] Worker queue sz {}", worker_queue.len());
 
         // Processing this will be the entry into Ghost Hunting now for syscalls.
-        for syscall in worker_queue {
+        for syscall_data in worker_queue {
             // todo
         }
-
-        let _ =
-            unsafe { KeDelayExecutionThread(KernelMode as _, FALSE as _, &mut thread_sleep_time) };
     }
 
     let _ = unsafe { PsTerminateSystemThread(STATUS_SUCCESS) };
     SYSCALL_CANCEL_THREAD.store(false, Ordering::SeqCst);
     SYSCALL_PP_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// Drain the active queue into the worker queue, so we can start doing work on it without
+/// causing contention of the queue that will be being pushed to with heavy load.
+fn extract_queued_items() -> Option<VecDeque<KernelSyscallIntercept>>{
+    let mut lock: FastMutexGuard<VecDeque<KernelSyscallIntercept>> =
+        match Grt::get_fast_mutex("alt_syscall_event_queue") {
+            Ok(lock) => match lock.lock() {
+                Ok(lock) => lock,
+                Err(e) => {
+                    println!(
+                        "[sanctum] [-] Could not lock alt_syscall_event_queue. {:?}",
+                        e
+                    );
+                    return None;
+                }
+            },
+            Err(e) => {
+                println!(
+                    "[sanctum] [-] Could not lock get FM: alt_syscall_event_queue. {:?}",
+                    e
+                );
+                return None;
+            }
+        };
+
+    if lock.is_empty() {
+        return None;
+    }
+
+    Some(mem::take(&mut *lock))
 }

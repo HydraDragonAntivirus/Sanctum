@@ -94,27 +94,28 @@ pub unsafe extern "C" fn process_create_callback(
             pid,
         };
 
-        if process_started.image_name.contains("otepad")
-            || process_started.image_name.contains("alware.ex")
-        {
-            println!(
-                "[sanctum] [i] Notepad created, pid: {}, ppid: {}",
-                pid, parent_pid
-            );
+        // if process_started.image_name.contains("otepad")
+        //     || process_started.image_name.contains("alware.ex")
+        // {
+        //     println!(
+        //         "[sanctum] [i] Notepad created, pid: {}, ppid: {}",
+        //         pid, parent_pid
+        //     );
 
-            if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
-                println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
-            };
-        }
+        //     // todo this is buggy af
+        //     if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
+        //         println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
+        //     };
+        // }
 
         // Attempt to dereference the DRIVER_MESSAGES global; if the dereference is successful,
         // add the relevant data to the queue
-        if !DRIVER_MESSAGES.load(Ordering::SeqCst).is_null() {
-            let obj = unsafe { &mut *DRIVER_MESSAGES.load(Ordering::SeqCst) };
-            obj.add_process_creation_to_queue(process_started);
-        } else {
-            println!("[sanctum] [-] Driver messages is null");
-        };
+        // if !DRIVER_MESSAGES.load(Ordering::SeqCst).is_null() {
+        //     let obj = unsafe { &mut *DRIVER_MESSAGES.load(Ordering::SeqCst) };
+        //     obj.add_process_creation_to_queue(process_started);
+        // } else {
+        //     println!("[sanctum] [-] Driver messages is null");
+        // };
     } else {
         // process terminated
 
@@ -190,6 +191,7 @@ pub unsafe extern "C" fn pre_process_handle_callback(
     ctx: *mut c_void,
     oi: *mut OB_PRE_OPERATION_INFORMATION,
 ) -> OB_PREOP_CALLBACK_STATUS {
+    return OB_PREOP_SUCCESS;
     // todo pick up from here after thread testing
 
     // println!("Inside callback for handle. oi: {:?}", oi);

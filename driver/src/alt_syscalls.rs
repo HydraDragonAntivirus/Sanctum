@@ -20,21 +20,20 @@ use crate::{
     core::syscall_processing::{
         KernelSyscallIntercept, NtAllocateVirtualMemory, Syscall, SyscallPostProcessor,
     }, ffi::{PsGetProcessImageFileName, ZwGetNextProcess, ZwGetNextThread}, utils::{
-        get_module_base_and_sz, scan_module_for_byte_pattern, thread_to_process_name, DriverError
+        get_module_base_and_sz, get_process_name, handle_to_pid, scan_module_for_byte_pattern, thread_to_process_name, DriverError
     }
 };
 
 const SLOT_ID: u32 = 0;
 const SSN_COUNT: usize = 0x500;
 
-const SSN_NT_OPEN_PROCESS: u32 = 0x26;
-const SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x18;
+pub const SSN_NT_OPEN_PROCESS: u32 = 0x26;
+pub const SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x18;
 
 const NT_OPEN_FILE: u32 = 0x0033;
 const NT_CREATE_SECTION: u32 = 0x004a;
 const NT_CREATE_SECTION_EX: u32 = 0x00c6;
 const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
-
 const NT_CREATE_FILE_SSN: u32 = 0x0055;
 const NT_TRACE_EVENT_SSN: u32 = 0x005e;
 
@@ -162,7 +161,7 @@ impl AltSyscalls {
         }
 
         // Enumerate all active processes and threads, and enable the relevant bits so that the alt syscall 'machine' can work :)
-        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Enable, Some(&["hello_world"]));
+        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Enable, None);
     }
 
     /// Sets the required context bits in memory on thread and KTHREAD.
@@ -233,7 +232,7 @@ impl AltSyscalls {
 
     /// Uninstall the Alt Syscall handlers from the kernel.
     pub fn uninstall() {
-        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Disable, Some(&["hello_world"]));
+        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Disable, None);
 
         // todo clean up the allocated memory
     }
@@ -380,6 +379,35 @@ impl AltSyscalls {
     }
 }
 
+/// A local definition of a KTHREAD, seeing as though the WDK doesn't export one for us. If this changes
+/// between kernel builds, it will cause problems :E
+#[repr(C)]
+struct KThreadLocalDef {
+    junk: [u8; 0x90],
+    k_trap_ptr: *mut KTRAP_FRAME,
+}
+
+#[inline(always)]
+fn extract_trap() -> Option<*const _KTRAP_FRAME>{ 
+    let mut k_thread: *const c_void = null_mut();
+    unsafe {
+        asm!(
+            "mov {}, gs:[0x188]",
+            out(reg) k_thread,
+        );
+    }
+
+    if k_thread.is_null() {
+        println!("[-] [Sanctum] No KTHREAD discovered.");
+        return None;
+    }
+
+    let p_ktrap = unsafe { &*(k_thread as *const KThreadLocalDef) }.k_trap_ptr;
+
+    Some(p_ktrap)
+
+}
+
 /// The callback routine which we control to run when a system call is dispatched via my alt syscall technique.
 ///
 /// # Args:
@@ -400,88 +428,27 @@ impl AltSyscalls {
 pub unsafe extern "system" fn syscall_handler(
     _p_nt_function: c_void,
     ssn: u32,
-    args_base: *const c_void,
-    p3_home: *const c_void,
+    _args_base: *const c_void,
+    _p3_home: *const c_void,
 ) -> i32 {
-    if args_base.is_null() || p3_home.is_null() {
-        println!("[sanctum] [-] Args base or arg4 was null??");
+
+    // todo remove once ready for mass testing
+    let proc_name = get_process_name().to_lowercase();
+    if !proc_name.contains("malware") {
         return 1;
     }
 
-    let k_trap = unsafe { p3_home.sub(0x10) } as *mut KTRAP_FRAME;
-    if k_trap.is_null() {
-        println!("[sanctum] [-] KTRAP_FRAME was null");
-        return 1;
-    }
+    let ktrap_frame = match extract_trap() {
+        Some(p) => unsafe {*p},
+        None => {
+            println!("[-] [sanctum] Could not get trap for syscall intercept.");
+            return 1
+        },
+    };
 
-    const ARG_5_STACK_OFFSET: usize = 0x28;
-
-    let k_trap = &mut unsafe { *k_trap };
-    let rsp = k_trap.Rsp as *const c_void;
-
-    // todo need to dynamically resolve the syscall for symbol
     match ssn {
-        NT_TRACE_EVENT_SSN => {
-            if let Ok(val) = block_etw_write(ssn, args_base) {
-                return val;
-            }
-        }
-
-        // SSN_NT_ALLOCATE_VIRTUAL_MEMORY => {
-        //     let rcx_handle = unsafe { *(args_base as *const *const c_void) } as HANDLE;
-
-        //     let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
-        //     let remote_pid = {
-        //         let mut ob: *mut c_void = null_mut();
-        //         _ = unsafe {
-        //             ObReferenceObjectByHandle(
-        //                 rcx_handle, 
-        //                 PROCESS_ALL_ACCESS, 
-        //                 *PsProcessType, 
-        //                 KernelMode as _, 
-        //                 &mut ob,
-        //                 null_mut()
-        //             )
-        //         };
-
-        //         let pid = unsafe { PsGetProcessId(ob as *mut _) } as u32;
-        //         unsafe {
-        //             ObfDereferenceObject(ob);
-        //         }
-
-        //         pid
-        //     };
-
-        //     // todo
-        //     // for now we only care about remote memory allocations
-        //     if current_pid == remote_pid {
-        //         return 1;
-        //     }
-
-        //     let rdx_base_addr = unsafe { *(args_base.add(0x8) as *const *const c_void) };
-        //     let r8_zero_bit = unsafe { *(args_base.add(0x10) as *const *const usize) };
-        //     let r9_sz = unsafe { **(args_base.add(0x18) as *const *const usize) };
-        //     let alloc_type =
-        //         unsafe { *(rsp.add(ARG_5_STACK_OFFSET) as *const _ as *const u32) } as u32;
-        //     let protect =
-        //         unsafe { *(rsp.add(ARG_5_STACK_OFFSET + 8) as *const _ as *const u32) } as u32;
-
-
-        //     let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
-        //         dest_pid: remote_pid,
-        //         base_address: rdx_base_addr,
-        //         sz: r9_sz,
-        //         alloc_type,
-        //         protect_flags: protect,
-        //     });
-
-        //     queue_syscall_post_processing(syscall_data);
-        // }
-        // SSN_NT_OPEN_PROCESS => {
-        //     let target_pid = unsafe { **(args_base.add(0x18) as *const *const u32) };
-        //     let current_pid = unsafe { PsGetCurrentProcessId() } as usize;
-        //     // println!("Og pid: {}, Target pid: {}", current_pid, target_pid);
-        // }
+        SSN_NT_ALLOCATE_VIRTUAL_MEMORY 
+            | SSN_NT_OPEN_PROCESS  => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
         // 0x3a => {
         //     println!(
         //         "[Write virtual memory] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
@@ -500,22 +467,10 @@ pub unsafe extern "system" fn syscall_handler(
         //         ssn, rcx, rsp
         //     );
         // }
-        _ => {
-            // println!("SSN: {:#x}", ssn);
-            // queue_syscall_post_processing();
-        }
+        _ => (),
     }
 
     1
-}
-
-#[inline(always)]
-fn queue_syscall_post_processing(syscall: Syscall) {
-    let pid = unsafe { PsGetCurrentProcessId() } as u64;
-
-    let parcel = KernelSyscallIntercept { pid, syscall };
-
-    SyscallPostProcessor::push(parcel);
 }
 
 /// Get the address of the non-exported kernel symbol: `PspServiceDescriptorGroupTable`
@@ -600,31 +555,6 @@ fn block_etw_write(
     }
 
     Ok(1)
-}
-
-
-#[inline(always)]
-fn get_process_name() -> String {
-    let mut pkthread: *mut c_void = null_mut();
-    
-    unsafe {
-        asm!(
-            "mov {}, gs:[0x188]",
-            out(reg) pkthread,
-        )
-    };
-    let p_eprocess = unsafe { IoThreadToProcess(pkthread as PETHREAD) } as *mut c_void;
-
-    let mut img = unsafe { PsGetProcessImageFileName(p_eprocess) } as *const u8;
-    let mut current_process_thread_name = String::new();
-    let mut counter: usize = 0;
-    while unsafe { core::ptr::read_unaligned(img) } != 0 || counter < 15 {
-        current_process_thread_name.push(unsafe { *img } as char);
-        img = unsafe { img.add(1) };
-        counter += 1;
-    }
-    
-    current_process_thread_name
 }
 
 #[inline(always)]
