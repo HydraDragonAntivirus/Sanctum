@@ -120,6 +120,8 @@ impl ProcessMonitor {
         let mut processes = BTreeMap::<u32, Process>::new();
         walk_processes_get_details(&mut processes);
 
+        println!("[sanctum] [i] Process monitor discovered {} processes on start.", processes.len());
+
         Grt::register_fast_mutex("ProcessMonitor", processes)
     }
 
@@ -197,11 +199,6 @@ impl ProcessMonitor {
                 QuadPart: ((max_time_allowed.as_nanos() / 100) as i64),
             };
 
-            let max_time_allowed_etw = Duration::from_secs(3);
-            let max_time_allowed_etw = LARGE_INTEGER {
-                QuadPart: ((max_time_allowed_etw.as_nanos() / 100) as i64),
-            };
-
             let mut index: usize = 0; // index of iterator over the ghost timers
             for item in &process.ghost_hunting_timers {
                 let mut current_time = LARGE_INTEGER::default();
@@ -224,11 +221,6 @@ impl ProcessMonitor {
 
                 index += 1;
             }
-        }
-
-        /// Adds an alertable syscall event to a process
-        pub fn add_alertable_syscall() {
-
         }
     }
 
@@ -467,7 +459,16 @@ fn walk_processes_get_details(processes: &mut BTreeMap<u32, Process>) {
         let p_e_process =
             unsafe { (entry as *mut u8).sub(ACTIVE_PROCESS_LINKS_OFFSET) } as *mut _EPROCESS;
 
-        let process_details = match extract_process_details(p_e_process) {
+        let pid = unsafe { PsGetProcessId(p_e_process as *mut _) } as usize;
+
+        // We can't get a handle / process details for the System Idle Process
+        if pid == 0 {
+            entry = unsafe { (*entry).Flink };
+            continue;
+        }
+
+        // Pull out the process details we need to add to our process list
+        let process_details = match extract_process_details(p_e_process, pid) {
             Ok(p) => p,
             Err(e) => {
                 println!(
@@ -500,9 +501,8 @@ fn walk_processes_get_details(processes: &mut BTreeMap<u32, Process>) {
 /// - pid
 /// - parent pid
 /// - image name (not full path)
-fn extract_process_details<'a>(process: *mut _EPROCESS) -> Result<Process, DriverError> {
+fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Process, DriverError> {
     let process_name = eprocess_to_process_name(process as *mut _)?;
-    let pid = unsafe { PsGetProcessId(process as *mut _) } as usize;
     let mut out_sz = 0;
 
     let mut process_information = PROCESS_BASIC_INFORMATION::default();
@@ -522,7 +522,7 @@ fn extract_process_details<'a>(process: *mut _EPROCESS) -> Result<Process, Drive
 
     if !nt_success(result) {
         println!(
-            "[sanctum] [-] ObOpenObjectByPointer failed during process walk. Error: {:#x}",
+            "[sanctum] [-] ObOpenObjectByPointer failed during process walk for pid: {pid}. Error: {:#x}",
             result
         );
         return Err(DriverError::Unknown(
