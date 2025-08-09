@@ -345,7 +345,6 @@ extern "C" fn image_load_callback(
             unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
 
         if !ImageLoadQueueForInjector::pid_in_waitlist(pid as usize) {
-            println!("[sanctum] [i] DLL injected into PID: {}!", pid as usize);
             break;
         }
     }

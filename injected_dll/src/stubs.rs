@@ -2,7 +2,7 @@
 
 use crate::{SYSCALL_NUMBER, integrity::get_base_and_sz_ntdll, ipc::send_ipc_to_engine};
 use shared_no_std::ghost_hunting::{
-    DLLMessage, NtAllocateVirtualMemory, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData,
+    DLLMessage, NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData,
     Syscall, SyscallEventSource,
 };
 use std::{arch::asm, ffi::c_void};
@@ -30,13 +30,18 @@ unsafe extern "system" fn open_process(
     if !client_id.is_null() {
         let target_pid = unsafe { (*client_id).UniqueProcess.0 } as u32;
         let pid = unsafe { GetCurrentProcessId() };
-
-        let data = DLLMessage::SyscallWrapper(Syscall {
-            nt_function: NtFunction::NtOpenProcess(Some(NtOpenProcessData { target_pid })),
-            pid: pid as u64,
-            source: SyscallEventSource::EventSourceSyscallHook,
-            evasion_weight: 30,
-        });
+        
+        let data = DLLMessage::SyscallWrapper(
+            Syscall::from_sanctum_dll(
+                pid, 
+                NtFunction::NtOpenProcess(
+                    NtOpenProcessData {
+                        target_pid,
+                        desired_mask: desired_access,
+                    },
+                ),
+            )
+        );
 
         // send the telemetry to the engine
         send_ipc_to_engine(data);
@@ -91,25 +96,22 @@ unsafe extern "system" fn virtual_alloc_ex(
             unsafe { *region_size }
         };
 
-        println!(
-            "[hook] [i] ntallocvm, addr: {:p}, pid responsible: {}, sz: {}",
-            base_address, remote_pid, region_size_checked
-        );
-
-        let data = DLLMessage::SyscallWrapper(Syscall {
-            nt_function: NtFunction::NtAllocateVirtualMemory(Some(NtAllocateVirtualMemory {
-                base_address: base_address as usize,
-                dest_pid: remote_pid,
-                sz: region_size_checked,
-                alloc_type: allocation_type,
-                protect_flags: protect,
-            })),
-            pid: pid as u64,
-            source: SyscallEventSource::EventSourceSyscallHook,
-            evasion_weight: 60,
+        let data = NtFunction::NtAllocateVirtualMemory(NtAllocateVirtualMemoryData {
+            base_address: base_address as usize,
+            dest_pid: remote_pid,
+            sz: region_size_checked,
+            alloc_type: allocation_type,
+            protect_flags: protect,
         });
 
-        send_ipc_to_engine(data);
+        let syscall = DLLMessage::SyscallWrapper(
+            Syscall::from_sanctum_dll(
+                pid, 
+                data
+            )
+        );
+
+        send_ipc_to_engine(syscall);
     }
 
     // proceed with the syscall
@@ -161,16 +163,14 @@ unsafe extern "system" fn nt_write_virtual_memory(
     // todo inspect buffer for signature of malware
     // todo inspect buffer  for magic bytes + dos header, etc
 
-    let data = Syscall {
-        nt_function: NtFunction::NtWriteVirtualMemory(Some(NtWriteVirtualMemoryData {
+    let data = Syscall::from_sanctum_dll(
+        pid,
+        NtFunction::NtWriteVirtualMemory(NtWriteVirtualMemoryData {
             target_pid: remote_pid,
             base_address: base_addr_as_usize,
             buf_len: buf_len_as_usize,
-        })),
-        pid: pid as u64,
-        source: SyscallEventSource::EventSourceSyscallHook,
-        evasion_weight: 60,
-    };
+        })
+    ); 
 
     send_ipc_to_engine(DLLMessage::SyscallWrapper(data));
 

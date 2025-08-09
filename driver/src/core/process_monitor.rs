@@ -14,9 +14,7 @@
 //!   Ghost Hunting telemetry
 
 use core::{
-    ffi::c_void,
-    ptr::{null, null_mut},
-    time::Duration,
+    ffi::c_void, mem::replace, ptr::{null, null_mut}, time::Duration
 };
 
 use alloc::{
@@ -35,25 +33,20 @@ use wdk_mutex::{
     grt::Grt,
 };
 use wdk_sys::{
-    _EPROCESS,
-    _MODE::KernelMode,
-    HANDLE, LARGE_INTEGER, LIST_ENTRY, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION,
-    PsProcessType, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE,
     ntddk::{
         IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise,
         ObOpenObjectByPointer, ObReferenceObjectByHandle, PsCreateSystemThread, PsGetProcessId,
-    },
+    }, PsProcessType, HANDLE, LARGE_INTEGER, LIST_ENTRY, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, _EPROCESS, _LARGE_INTEGER, _MODE::KernelMode
 };
 
 use crate::{
-    ffi::{InitializeObjectAttributes, NtQueryInformationProcess},
+    ffi::NtQueryInformationProcess,
     utils::{DriverError, eprocess_to_process_name},
 };
 
-use super::syscall_processing::SyscallPostProcessor;
-
 /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
 /// onto it, can be tracked and monitored.
+#[derive(Debug)]
 pub struct Process {
     pub pid: u32,
     /// Parent pid
@@ -66,6 +59,7 @@ pub struct Process {
     /// the kernel receiving the notification. Failure to match this may be an indicator of hooked syscall evasion.
     pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
     targeted_by_apis: Vec<ProcessTargetedApis>,
+    marked_for_deletion: bool,
 }
 
 // todo needs implementing
@@ -76,15 +70,26 @@ pub struct ProcessTargetedApis {}
 /// https://fluxsec.red/edr-syscall-hooking
 ///
 /// The data contained in this struct allows timers to be polled and detects abuse of direct syscalls / hells gate.
+#[derive(Clone)]
 pub struct GhostHuntingTimer {
     // Query the time via `KeQuerySystemTime`
     pub timer_start: LARGE_INTEGER,
     pub event_type: NtFunction,
     /// todo update docs
     pub origin: SyscallEventSource,
-    /// Specifies which syscall types of a matching event this is cancellable by. As the EDR monitors multiple
-    /// sources of telemetry, we cannot do a 1:1 cancellation process.
-    pub cancellable_by: isize,
+}
+
+impl core::fmt::Debug for GhostHuntingTimer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "GhostHuntingTimer: \
+            timer_start: {}, \
+            event_type: {:?}, \
+            origin: {:?}",
+            unsafe { self.timer_start.QuadPart },
+            self.event_type,
+            self.origin,
+        )
+    }
 }
 
 /// The ProcessMonitor is responsible for monitoring all processes running; this
@@ -142,6 +147,7 @@ impl ProcessMonitor {
             allow_listed: false,
             ghost_hunting_timers: Vec::new(),
             targeted_by_apis: Vec::new(),
+            marked_for_deletion: false,
         });
 
         Ok(())
@@ -150,25 +156,66 @@ impl ProcessMonitor {
     // todo need to remove processes from the monitor once they are terminated
     pub fn remove_process(pid: u32) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
-        if process_lock.remove(&pid).is_none() {
-            println!("[sanctum] [-] Error removing process from active processes.");     
+
+        //
+        // We want to remove a process from the monitor only once any pending transactions have been completed.
+        // This will ensure that if malware does something bad, which we are waiting on other telemetry for, and the 
+        // process terminates before we have chance to receive that telemetry, that the incident does not get lost.
+        // In the case there are outstanding transactions, we will mark the process for termination; only once all transactions
+        // are closed.
+        //
+        // The logic for monitoring those transactions will be held elsewhere (in the main worker thread for Process Monitoring)
+        // 
+
+        let process = match process_lock.get_mut(&pid) {
+            Some(process) => process,
+            None => {
+                println!("[sanctum] [-] PID {pid} not found in active processes when trying to remove process.");
+                return;
+            },
+        };
+
+        // If it has outstanding, mark for deletion until those are completed
+        if process.has_outstanding_transactions() {
+            process.marked_for_deletion = true;
+            return;
         }
+
+        let _ = process_lock.remove(&pid);
     }
 
     /// Notifies the Ghost Hunting management that a new huntable event has occurred.
-    pub fn ghost_hunt_add_event(pid: u32, signal: Syscall) {
+    pub fn ghost_hunt_add_event(signal: Syscall) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
 
-        if let Some(process) = process_lock.get_mut(&pid) {
+        if let Some(process) = process_lock.get_mut(&signal.pid) {
             let mut current_time = LARGE_INTEGER::default();
             unsafe { KeQuerySystemTimePrecise(&mut current_time) };
 
             process.add_ghost_hunt_timer(GhostHuntingTimer {
                 timer_start: current_time,
-                cancellable_by: 1,
                 event_type: signal.data,
                 origin: signal.source,
             });
+        }
+    }
+
+    /// Iterates through the [`ProcessMonitor`] to search for a [`Process`] which is marked for deletion
+    /// with no outstanding transactions.
+    fn remove_stale_processes() {
+        let mut process_lock = ProcessMonitor::get_mtx_inner();
+        let mut pids_to_remove: Vec<u32> = Vec::new();
+
+        for (_, process) in process_lock.iter_mut() {
+            if process.marked_for_deletion &&
+                !process.has_outstanding_transactions() {
+                    pids_to_remove.push(process.pid);
+            }
+        }
+
+        for pid in pids_to_remove {
+            let _ = process_lock.remove(&pid);
+            println!("[sanctum] [i] Removed {pid} from stale processes after completion of pending transactions.");
         }
     }
 
@@ -176,59 +223,51 @@ impl ProcessMonitor {
     /// with kernel events sent from our driver.
     ///
     /// This is part of my Ghost Hunting technique https://fluxsec.red/edr-syscall-hooking
-    pub fn poll_ghost_timers() {
+    pub fn poll_ghost_timers(
+        max_time_allowed: _LARGE_INTEGER,
+    ) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
-
+        
         for (_, process) in process_lock.iter_mut() {
+            let mut open_timers: Vec<GhostHuntingTimer> = Vec::with_capacity(process.ghost_hunting_timers.len());
+            
             if process.ghost_hunting_timers.is_empty() {
                 continue;
             }
 
             //
-            // In here process each API event we are tracking in the ghost timers.
+            // Iterate over each Ghost Hunting timer that is active on the process. If the timer exceeds the permitted
+            // wait time, aka it appears as though Hells Gate etc is being used, then.. todo.
+            // 
+            // Otherwise, we keep the timer on the process. To keep the borrow checker happy, we push the timers that are
+            // untouched to a new temp vector, and use a core::mem::replace to swap ownership of the data. This allows us to
+            // iterate over the timers mutably, whilst in effect, altering them in place and preserving the order (which is important
+            // as the older timers will be towards the beginning of the vec, so that needs to match other signals), otherwise we will
+            // get a lot of false alerts on timer mismatches. Theres some unavoidable cloning going on here, but I dont think the footprint
+            // of the clones should be too much of a problem.
             //
-
-            // todo try integrate the following into the windows-drivers-rs project:
-            // https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/using-timers
-            // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdftimer/nf-wdftimer-wdftimercreate
-            // Kinda wanna do it as a driver POC for now, then once working, can try migrate it into the windows drivers
-            // project so I can use event timers from the wdk, rather than a system thread.
-
-            // todo these are being computed every time; perhaps they could be moved inside of the `FastMutex` and computed
-            // only once
-            let max_time_allowed = Duration::from_secs(1);
-            let max_time_allowed = LARGE_INTEGER {
-                QuadPart: ((max_time_allowed.as_nanos() / 100) as i64),
-            };
-
-            let mut index: usize = 0; // index of iterator over the ghost timers
-            for item in &process.ghost_hunting_timers {
+            for timer in process.ghost_hunting_timers.iter_mut() {
                 let mut current_time = LARGE_INTEGER::default();
                 unsafe { KeQuerySystemTimePrecise(&mut current_time) };
 
-                // We are only running the driver on x64, so we can compute the delta using the QuadPart.
-
-                let time_delta = unsafe { current_time.QuadPart - item.timer_start.QuadPart };
+                let time_delta = unsafe { current_time.QuadPart - timer.timer_start.QuadPart };
 
                 if time_delta > unsafe { max_time_allowed.QuadPart } {
+                    // todo risk score
                     // process.update_process_risk_score(item.weight);
                     println!(
                         "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
-                        item.event_type, process.pid
+                        timer.event_type, process.pid
                     );
 
-                    process.ghost_hunting_timers.remove(index);
-                    break;
+                    // todo send telemetry to server?
+                } else {
+                    open_timers.push(timer.clone())
                 }
-
-                index += 1;
             }
-        }
-    }
 
-    pub fn handle_syscall_ghost_hunt_event(data: &Syscall) {
-        // println!("[sanctum] [i] Syscall ghost hunt data: {:?}", data);
-        ProcessMonitor::ghost_hunt_add_event(data.pid, data.clone());
+            let _ = replace(&mut process.ghost_hunting_timers, open_timers);
+        }
     }
 
     fn get_mtx_inner<'a>() -> FastMutexGuard<'a, BTreeMap<u32, Process>> {
@@ -254,11 +293,11 @@ impl ProcessMonitor {
         process_lock
     }
 
-    /// Spawns a system thread to poll Ghost Hunting timers.
+    /// Spawns a system thread to poll Ghost Hunting timers and do other work on behalf of the [`ProcessMonitor`].
     ///
     /// # Panics
     /// Panics if thread creation or handle reference fails.
-    pub fn start_ghost_hunt_monitor() {
+    pub fn start_process_monitor_worker() {
         // Start the thread that will monitor for changes
         let mut thread_handle: HANDLE = null_mut();
 
@@ -269,14 +308,14 @@ impl ProcessMonitor {
                 null_mut(),
                 null_mut(),
                 null_mut(),
-                Some(thread_run_monitor_ghost_hunting),
+                Some(process_monitor_worker_thread),
                 null_mut(),
             )
         };
 
         if thread_status != STATUS_SUCCESS {
             println!(
-                "[sanctum] [-] Could not create new thread for monitoring ETW patching, kernel ETW is not being monitored."
+                "[sanctum] [-] Could not create new thread for the process monitor."
             );
             panic!();
         }
@@ -296,7 +335,7 @@ impl ProcessMonitor {
         } != STATUS_SUCCESS
         {
             println!(
-                "[sanctum] [-] Could not get thread handle by ObRef.. kernel ETW is not being monitored."
+                "[sanctum] [-] Could not get thread handle by ObRef.. process monitor not running."
             );
             panic!()
         }
@@ -316,46 +355,14 @@ impl ProcessMonitor {
     }
 }
 
-/// Remove an event source from a given Ghost Hunting timer.
-///
-/// This function will modify the timer object to remove a cancellable event origin in place.
-///
-/// # Args
-/// - `timer`: A mutable reference to the GhostHuntingTimer for a given process
-/// - `new_source`: An isize representing whether we need to unset a different bit (see remarks)
-///
-/// # Remarks
-/// In the case where you are unsetting the cancellable bit for the 'self' i.e. there are no active Ghost Hunting
-/// events in the queue for that API, you want to unset the bit for where it came from, as you only want to match on the
-/// other bit fields. In this case, enter this `new_source` param as `None`.
-///
-/// However; if you are processing a **new** API where there **is** an active timer waiting for the relevant cancellation events
-/// to come in, then opt for `Some` where the `T` is an `SyscallEventSource` representing the source of where the syscall
-/// was detected from.
-#[inline(always)]
-fn unset_event_flag_in_timer(
-    timer: &mut GhostHuntingTimer,
-    new_source: Option<SyscallEventSource>,
-) {
-    // flip the set bit back to a 0
-    match new_source {
-        Some(new_source) => {
-            timer.cancellable_by = timer.cancellable_by as isize ^ new_source as isize;
-        }
-        None => timer.cancellable_by = timer.cancellable_by as isize ^ timer.origin as isize,
-    }
-}
-
 impl Process {
     /// Adds a ghost hunt timer specifically to a process.
     ///
     /// This function will internally deal with cases where a timer for the same API already exists. If the timer already exists, it will
     /// use bit flags to
-    fn add_ghost_hunt_timer(&mut self, mut new_timer: GhostHuntingTimer) {
+    fn add_ghost_hunt_timer(&mut self, new_timer: GhostHuntingTimer) {
         // If the timers are empty; then its the first in so we can add it to the list straight up.
         if self.ghost_hunting_timers.is_empty() {
-            // remove the current notification from the cancellable by (prevent dangling timers)
-            unset_event_flag_in_timer(&mut new_timer, None);
             self.ghost_hunting_timers.push(new_timer);
             return;
         }
@@ -370,44 +377,54 @@ impl Process {
             if core::mem::discriminant(&timer_iter.event_type)
                 == core::mem::discriminant(&new_timer.event_type)
             {
-                if timer_iter.cancellable_by & new_timer.origin as isize
-                    == new_timer.origin as isize
-                {
-                    unset_event_flag_in_timer(timer_iter, Some(new_timer.origin));
-
-                    // If everything is cancelled out (aka all bit fields set to 0 remove the timer completely from the process)
-                    if timer_iter.cancellable_by == 0 {
-                        self.ghost_hunting_timers.remove(index);
-                        return;
-                    }
-
+                if timer_iter.origin != new_timer.origin {
+                    self.ghost_hunting_timers.remove(index);
                     return;
                 }
             }
         }
 
-        // we did not match on the above timer.event_type in the list of active timers, so add the element as a new timer
-        // remove the current notification from the cancellable by (prevent dangling timers)
-        unset_event_flag_in_timer(&mut new_timer, None);
         self.ghost_hunting_timers.push(new_timer);
+    }
+
+    fn has_outstanding_transactions(&self) -> bool {
+        !self.ghost_hunting_timers.is_empty()
     }
 }
 
 /// Worker thread entry point. Sleeps once per second, polls all `ghost_hunting_timers`, and exits when the driver is unloaded.
-unsafe extern "C" fn thread_run_monitor_ghost_hunting(_: *mut c_void) {
+unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {    
+
     let delay_as_duration = Duration::from_secs(1);
     let mut thread_sleep_time = LARGE_INTEGER {
         QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
     };
 
+    let max_time_allowed_for_ghost_hunting_delta = Duration::from_secs(5);
+    let max_time_allowed_for_ghost_hunting_delta = LARGE_INTEGER {
+        QuadPart: ((max_time_allowed_for_ghost_hunting_delta.as_nanos() / 100) as i64),
+    };
+ 
     loop {
-        let _ =
-            unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
-        ProcessMonitor::poll_ghost_timers();
+        let _ = unsafe { KeDelayExecutionThread(
+            KernelMode as _, 
+            TRUE as _, 
+            &mut thread_sleep_time
+        )};
+        
+        ProcessMonitor::poll_ghost_timers(max_time_allowed_for_ghost_hunting_delta);
+        ProcessMonitor::remove_stale_processes();
 
         // Check if we have received the cancellation flag, without this check we will get a BSOD. This flag will be
         // set to true on DriverExit.
-        let terminate_flag_lock: &FastMutex<bool> = match Grt::get_fast_mutex(
+        if process_monitor_thread_termination_flag_raised() {
+            break;
+        }
+    }
+}
+
+fn process_monitor_thread_termination_flag_raised() -> bool {
+    let terminate_flag_lock: &FastMutex<bool> = match Grt::get_fast_mutex(
             "TERMINATION_FLAG_GH_MONITOR",
         ) {
             Ok(lock) => lock,
@@ -418,7 +435,7 @@ unsafe extern "C" fn thread_run_monitor_ghost_hunting(_: *mut c_void) {
                     "[sanctum] [-] Error getting fast mutex for TERMINATION_FLAG_GH_MONITOR. {:?}",
                     e
                 );
-                continue;
+                return false;
             }
         };
         let lock = match terminate_flag_lock.lock() {
@@ -428,13 +445,11 @@ unsafe extern "C" fn thread_run_monitor_ghost_hunting(_: *mut c_void) {
                     "[sanctum] [-] Failed to lock mutex for terminate_flag_lock/ {:?}",
                     e
                 );
-                continue;
+                return false;
             }
         };
-        if *lock {
-            break;
-        }
-    }
+
+    *lock
 }
 
 /// Walk all processes and get [`Process`] details for each process running on the system.
@@ -563,5 +578,6 @@ fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Pr
         allow_listed: false,
         ghost_hunting_timers: Vec::new(),
         targeted_by_apis: Vec::new(),
+        marked_for_deletion: false,
     })
 }

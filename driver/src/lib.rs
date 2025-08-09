@@ -147,8 +147,7 @@ fn initialise_sanctum(driver: &mut DRIVER_OBJECT) -> Result<(), i32> {
     // Thread interception
     set_thread_creation_callback();
 
-    // todo this isnt actually doing anything?
-    ProcessMonitor::start_ghost_hunt_monitor();
+    ProcessMonitor::start_process_monitor_worker();
 
     // todo this is just a ret after the callback is registered...
     let status = register_image_load_callback();

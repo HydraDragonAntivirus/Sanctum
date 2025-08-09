@@ -96,7 +96,7 @@ pub async fn run_ipc_for_injected_dll(tx: Sender<Syscall>) {
                                                 todo!()
                                             }
                                         };
-                                        if pipe_pid as u64 != syscall.pid {
+                                        if pipe_pid != syscall.pid {
                                             // todo this is bad and should do something
                                             eprintln!("!!!!!!!!!!! PIDS DONT MATCH!");
                                         }

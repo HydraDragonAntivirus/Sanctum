@@ -34,18 +34,43 @@ pub struct Syscall {
     pub data: NtFunction,
 }
 
+impl Syscall {
+    pub fn from_kernel(
+        process_initiating_pid: u32,
+        data: NtFunction
+    ) -> Self {
+        Self {
+            pid: process_initiating_pid,
+            source: SyscallEventSource::EventSourceKernel,
+            data,
+        }
+    }
+
+    pub fn from_sanctum_dll(
+        process_initiating_pid: u32,
+        data: NtFunction
+    ) -> Self {
+        Self {
+            pid: process_initiating_pid,
+            source: SyscallEventSource::EventSourceSyscallHook,
+            data,
+        }
+    }
+}
+
 /// todo docs
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NtFunction {
-    NtOpenProcess(Option<NtOpenProcessData>),
-    NtWriteVirtualMemory(Option<NtWriteVirtualMemoryData>),
-    NtAllocateVirtualMemory(Option<NtAllocateVirtualMemory>),
+    NtOpenProcess(NtOpenProcessData),
+    NtWriteVirtualMemory(NtWriteVirtualMemoryData),
+    NtAllocateVirtualMemory(NtAllocateVirtualMemoryData),
 }
 
 /// todo docs
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NtOpenProcessData {
     pub target_pid: u32,
+    pub desired_mask: u32,
 }
 
 /// todo docs
@@ -60,7 +85,7 @@ pub struct NtWriteVirtualMemoryData {
 unsafe impl Send for Syscall {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct NtAllocateVirtualMemory {
+pub struct NtAllocateVirtualMemoryData {
     pub dest_pid: u32,
     pub base_address: usize,
     pub sz: usize,

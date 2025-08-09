@@ -9,7 +9,7 @@ use core::{
 };
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
-use shared_no_std::ghost_hunting::{NtAllocateVirtualMemory, NtOpenProcess};
+use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcess, NtOpenProcessData, Syscall};
 use wdk::{nt_success, println};
 use wdk_mutex::{
     fast_mutex::FastMutexGuard,
@@ -32,14 +32,13 @@ static SYSCALL_PP_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
-#[derive(Debug)]
-pub enum Syscall {
-    NtOpenProcess(NtOpenProcess),
-    NtAllocateVirtualMemory(NtAllocateVirtualMemory),
-}
+// #[derive(Debug)]
+// pub enum Syscall {
+//     NtOpenProcess(NtOpenProcess),
+//     NtAllocateVirtualMemory(NtAllocateVirtualMemory),
+// }
 
 pub struct KernelSyscallIntercept {
-    pub pid: u64,
     pub syscall: Syscall,
 }
 
@@ -91,11 +90,14 @@ impl KernelSyscallIntercept {
         let access_mask = ktrap_frame.Rdx as u32;
         
         Some(
-            Syscall::NtOpenProcess(
-                NtOpenProcess { 
-                    target_pid: remote_pid, 
-                    acces_mask: access_mask,
-                }
+            Syscall::from_kernel(
+                current_pid, 
+                NtFunction::NtOpenProcess(
+                    NtOpenProcessData {
+                        target_pid: remote_pid,
+                        desired_mask: access_mask,
+                    }
+                )
             )
         )
     }
@@ -124,13 +126,18 @@ impl KernelSyscallIntercept {
             *((ktrap_frame.Rsp as *const usize).add(6) as *const u32) 
         };
         
-        let syscall_data = Syscall::NtAllocateVirtualMemory(NtAllocateVirtualMemory {
-            dest_pid,
-            base_address: base_address as usize,
-            sz,
-            alloc_type,
-            protect_flags,
-        });
+        let syscall_data = Syscall::from_kernel(
+            current_pid, 
+            NtFunction::NtAllocateVirtualMemory(
+                NtAllocateVirtualMemoryData {
+                    dest_pid,
+                    base_address: base_address as usize,
+                    sz,
+                    alloc_type,
+                    protect_flags,
+                }
+            )
+        );
 
         Some(syscall_data)
     }
@@ -179,8 +186,7 @@ impl SyscallPostProcessor {
             return;
         }
 
-        let pid = unsafe { PsGetCurrentProcessId() } as u64;
-        let syscall_data = KernelSyscallIntercept { pid, syscall };
+        let syscall_data = KernelSyscallIntercept { syscall };
 
         let mut lock: FastMutexGuard<VecDeque<KernelSyscallIntercept>> =
             match Grt::get_fast_mutex("alt_syscall_event_queue") {
