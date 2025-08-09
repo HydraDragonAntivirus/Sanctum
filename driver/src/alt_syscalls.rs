@@ -130,11 +130,6 @@ impl AltSyscalls {
                     | (GENERIC_PATH_FLAGS | (NUM_QWORD_STACK_ARGS_TO_CPY & 0xF));
         }
 
-        println!(
-            "[sanctum] [+] Address of the alt syscalls metadata table: {:p}",
-            p_metadata_table
-        );
-
         // Get the address of PspServiceDescriptorGroupTable from the kernel by doing some pattern matching; I don't believe
         // we can link to the symbol.
         let kernel_service_descriptor_table = match lookup_global_table_address(driver) {
@@ -509,90 +504,10 @@ fn lookup_global_table_address(_driver: &DRIVER_OBJECT) -> Result<*mut c_void, D
     // offset from fn
     let instruction_address = unsafe { fn_address.add(0x77) };
 
-    println!(
-        "Instruction address to get offset: {:p}",
-        instruction_address
-    );
-
     let disp32 =
         unsafe { core::ptr::read_unaligned((instruction_address.add(3)) as *const i32) } as isize;
     let next_rip = instruction_address as isize + 7;
     let absolute = (next_rip + disp32) as *const c_void;
 
-    println!("Address of PspServiceDescriptorGroupTable: {:p}", absolute);
-
     Ok(absolute as *mut _)
-}
-
-#[inline(always)]
-fn block_etw_write(
-    ssn: u32,
-    args_base: *const c_void,
-) -> Result<i32, ()> {
-
-    let proc_name = get_process_name().to_lowercase();
-
-    if proc_name.contains("hello_world") {
-        println!("Found hello world");
-
-        let mut rsp_val: u64 = 0;
-        
-        unsafe {
-            asm!(
-                "mov {out}, rsp",
-                out = out(reg) rsp_val,
-                options(nomem, nostack, preserves_flags),
-            );
-        }
-
-        // rsp + offset of stack frames calculated.
-        let trap_addr = (rsp_val + 0x540 + 0x210) as *mut _KTRAP_FRAME;
-
-        println!("Addr: {:p}", trap_addr);
-
-        let mut ktrap: _KTRAP_FRAME = unsafe { *trap_addr };
-        
-        // change the return value to usermode
-        unsafe { (*trap_addr).P3Home = 0xff };
-
-        // print the SSN
-        println!("RAX: {:X}", ktrap.Rax);
-
-        return Ok(0);
-    }
-
-    Ok(1)
-}
-
-#[inline(always)]
-fn get_object_name(args_base: *const c_void) -> Result<String, ()> {
-    let p_object_attributes = unsafe {
-        *( args_base.add(0x10) as *const *const OBJECT_ATTRIBUTES )
-    };
-
-    if p_object_attributes.is_null() || unsafe { MmIsAddressValid(p_object_attributes as *mut OBJECT_ATTRIBUTES as *mut c_void) } == 0 {
-        return Err(());
-    }
-
-    let oa: OBJECT_ATTRIBUTES = unsafe { *p_object_attributes };
-
-    if oa.ObjectName.is_null() {
-        return Err(());
-    }
-
-    let object_name = unsafe { *oa.ObjectName };
-    if unsafe { MmIsAddressValid(object_name.Buffer as *mut c_void) } == 0 {
-        return Err(());
-    }
-
-    let buf = object_name.Buffer;
-    let s = unsafe { core::slice::from_raw_parts(buf, (object_name.Length as usize) / 2) };
-    let object_name_string = match String::from_utf16(s) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(());
-        },
-    };
-
-    Ok(object_name_string)
 }
