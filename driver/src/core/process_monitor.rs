@@ -228,7 +228,6 @@ impl ProcessMonitor {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
         
         for (_, process) in process_lock.iter_mut() {
-            let mut open_timers: Vec<GhostHuntingTimer> = Vec::with_capacity(process.ghost_hunting_timers.len());
             
             if process.ghost_hunting_timers.is_empty() {
                 continue;
@@ -245,27 +244,22 @@ impl ProcessMonitor {
             // get a lot of false alerts on timer mismatches. Theres some unavoidable cloning going on here, but I dont think the footprint
             // of the clones should be too much of a problem.
             //
-            for timer in process.ghost_hunting_timers.iter_mut() {
+            
+            for expired_timer in process.ghost_hunting_timers.extract_if(.., |t| {
                 let mut current_time = LARGE_INTEGER::default();
                 unsafe { KeQuerySystemTimePrecise(&mut current_time) };
 
-                let time_delta = unsafe { current_time.QuadPart - timer.timer_start.QuadPart };
-
-                if time_delta > unsafe { max_time_allowed.QuadPart } {
+                let time_delta = unsafe { current_time.QuadPart - t.timer_start.QuadPart };
+                time_delta > unsafe { max_time_allowed.QuadPart }
+            }) {
                     // todo risk score
                     // process.update_process_risk_score(item.weight);
                     println!(
                         "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
-                        timer.event_type, process.pid
+                        expired_timer.event_type, process.pid
                     );
-
-                    // todo send telemetry to server?
-                } else {
-                    open_timers.push(timer.clone())
-                }
+                    // todo telemetry
             }
-
-            let _ = replace(&mut process.ghost_hunting_timers, open_timers);
         }
     }
 

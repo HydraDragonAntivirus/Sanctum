@@ -5,6 +5,7 @@
 //      Blog: https://fluxsec.red/
 
 #![feature(map_try_insert)]
+#![feature(extract_if)]
 #![no_std]
 extern crate alloc;
 
