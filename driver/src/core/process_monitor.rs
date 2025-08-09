@@ -14,7 +14,7 @@
 //!   Ghost Hunting telemetry
 
 use core::{
-    ffi::c_void, mem::replace, ptr::{null, null_mut}, time::Duration
+    ffi::c_void, mem::replace, ptr::null_mut, time::Duration
 };
 
 use alloc::{
@@ -215,7 +215,6 @@ impl ProcessMonitor {
 
         for pid in pids_to_remove {
             let _ = process_lock.remove(&pid);
-            println!("[sanctum] [i] Removed {pid} from stale processes after completion of pending transactions.");
         }
     }
 
@@ -395,12 +394,12 @@ impl Process {
 /// Worker thread entry point. Sleeps once per second, polls all `ghost_hunting_timers`, and exits when the driver is unloaded.
 unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {    
 
-    let delay_as_duration = Duration::from_secs(1);
+    let delay_as_duration = Duration::from_millis(200);
     let mut thread_sleep_time = LARGE_INTEGER {
         QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
     };
 
-    let max_time_allowed_for_ghost_hunting_delta = Duration::from_secs(5);
+    let max_time_allowed_for_ghost_hunting_delta = Duration::from_secs(1);
     let max_time_allowed_for_ghost_hunting_delta = LARGE_INTEGER {
         QuadPart: ((max_time_allowed_for_ghost_hunting_delta.as_nanos() / 100) as i64),
     };

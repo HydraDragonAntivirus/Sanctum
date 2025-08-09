@@ -9,7 +9,7 @@ use core::{
 };
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
-use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcess, NtOpenProcessData, Syscall};
+use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, Syscall};
 use wdk::{nt_success, println};
 use wdk_mutex::{
     fast_mutex::FastMutexGuard,
@@ -21,7 +21,7 @@ use wdk_sys::{
     }, CLIENT_ID, FALSE, HANDLE, KTRAP_FRAME, LARGE_INTEGER, STATUS_SUCCESS, THREAD_ALL_ACCESS, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
-use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS}, utils::{handle_to_pid, DriverError}};
+use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS}, core::process_monitor::ProcessMonitor, utils::{handle_to_pid, DriverError}};
 
 /// Indicates whether the [`SyscallPostProcessor`] system is active or not. Active == true.
 /// Using a static atomic as we cannot explicitly get a handle to a SyscallPostProcessor if it does not
@@ -320,22 +320,21 @@ unsafe extern "C" fn syscall_post_processing_worker(_: *mut c_void) {
         let _ =
             unsafe { KeDelayExecutionThread(KernelMode as _, FALSE as _, &mut thread_sleep_time) };
 
-        //
-        // Extract any Alt Syscall intercepted queued items which need to go through
-        // processing.
-        //
-        // If there are None, then go back to the start of the threads loop.
-        //
         let worker_queue = match extract_queued_items() {
             Some(w) => w,
             None => continue,
         };
 
-        println!("[sanctum] [THREAD] Worker queue sz {}", worker_queue.len());
-
-        // Processing this will be the entry into Ghost Hunting now for syscalls.
+        //
+        // Process each syscall we intercepted, at the minimum this should add to the Ghost
+        // Hunt where appropriate to detect Hells Gate / direct / indirect syscall abuse!
+        // In addition to this, we can block certain syscalls until we meet a certain predicate,
+        // for example, refusing to start a new thread in a foreign process until we validate some 
+        // risk factors on the injecting process / target process, are there any Ghost Hunting timers 
+        // outstanding for syscalls we care about.
+        // 
         for syscall_data in worker_queue {
-            // todo
+            ProcessMonitor::ghost_hunt_add_event(syscall_data.syscall);
         }
     }
 
