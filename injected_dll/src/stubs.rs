@@ -5,7 +5,7 @@ use shared_no_std::ghost_hunting::{
     DLLMessage, NtAllocateVirtualMemory, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData,
     Syscall, SyscallEventSource,
 };
-use std::{arch::asm, ffi::c_void, thread::sleep, time::Duration};
+use std::{arch::asm, ffi::c_void};
 use windows::Win32::{
     Foundation::HANDLE,
     System::{

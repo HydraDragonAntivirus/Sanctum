@@ -23,17 +23,15 @@ pub enum DLLMessage {
 
 /// Information relating to a syscall event which happened on the device. This struct holds:
 ///
+/// - `pid`: The ID of the process making the syscall
+/// - `source`: Where the system event was captured, e.g. a hooked syscall, ETW, or the driver.
 /// - `data`: This field is generic over T which must implement the `HasPid` trait. This field contains the metadata associated
 /// with the syscall.
-/// - `source`: Where the system event was captured, e.g. a hooked syscall, ETW, or the driver.
-/// - `evasion_weight`: The weight associated with the event if EDR evasion is detected.
-/// - todo: `event_weight` for general weighting if this occurs, same as the normal weight i guess?
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Syscall {
-    pub nt_function: NtFunction,
-    pub pid: u64,
+    pub pid: u32,
     pub source: SyscallEventSource,
-    pub evasion_weight: i16,
+    pub data: NtFunction,
 }
 
 /// todo docs

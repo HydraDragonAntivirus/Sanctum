@@ -49,9 +49,9 @@ pub unsafe extern "C" fn process_create_callback(
 
         let image_name = unicode_to_string((*create_info).ImageFileName);
         let command_line = unicode_to_string((*create_info).CommandLine);
-        let parent_pid = (*create_info).ParentProcessId as u64;
+        let parent_pid = (*create_info).ParentProcessId as u32;
         // (*create_info).
-        let pid = pid as u64;
+        let pid = pid as u32;
 
         if image_name.is_err() || command_line.is_err() {
             return;

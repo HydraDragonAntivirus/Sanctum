@@ -454,8 +454,8 @@ pub unsafe extern "system" fn syscall_handler(
     };
 
     match ssn {
-        SSN_NT_OPEN_PROCESS => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
-        SSN_NT_ALLOCATE_VIRTUAL_MEMORY => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
+        SSN_NT_OPEN_PROCESS 
+            | SSN_NT_ALLOCATE_VIRTUAL_MEMORY => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
         // 0x3a => {
         //     println!(
         //         "[Write virtual memory] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",

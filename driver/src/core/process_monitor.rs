@@ -55,9 +55,9 @@ use super::syscall_processing::SyscallPostProcessor;
 /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
 /// onto it, can be tracked and monitored.
 pub struct Process {
-    pub pid: u64,
+    pub pid: u32,
     /// Parent pid
-    pub ppid: u64,
+    pub ppid: u32,
     pub process_image: String,
     pub commandline_args: String,
     pub risk_score: u16,
@@ -85,7 +85,6 @@ pub struct GhostHuntingTimer {
     /// Specifies which syscall types of a matching event this is cancellable by. As the EDR monitors multiple
     /// sources of telemetry, we cannot do a 1:1 cancellation process.
     pub cancellable_by: isize,
-    pub weight: i16,
 }
 
 /// The ProcessMonitor is responsible for monitoring all processes running; this
@@ -118,7 +117,7 @@ impl ProcessMonitor {
     /// static; or use the `Grt` design pattern (favoured in this case).
     pub fn new() -> Result<(), GrtError> {
         // Walk all processes and add to the proc mon.
-        let mut processes = BTreeMap::<u64, Process>::new();
+        let mut processes = BTreeMap::<u32, Process>::new();
         walk_processes_get_details(&mut processes);
 
         Grt::register_fast_mutex("ProcessMonitor", processes)
@@ -147,13 +146,13 @@ impl ProcessMonitor {
     }
 
     // todo need to remove processes from the monitor once they are terminated
-    pub fn remove_process(pid: u64) {
+    pub fn remove_process(pid: u32) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
         process_lock.remove(&pid);
     }
 
     /// Notifies the Ghost Hunting management that a new huntable event has occurred.
-    pub fn ghost_hunt_add_event(pid: u64, signal: Syscall) {
+    pub fn ghost_hunt_add_event(pid: u32, signal: Syscall) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
 
         if let Some(process) = process_lock.get_mut(&pid) {
@@ -163,9 +162,8 @@ impl ProcessMonitor {
             process.add_ghost_hunt_timer(GhostHuntingTimer {
                 timer_start: current_time,
                 cancellable_by: 1,
-                event_type: signal.nt_function,
+                event_type: signal.data,
                 origin: signal.source,
-                weight: signal.evasion_weight,
             });
         }
     }
@@ -239,9 +237,9 @@ impl ProcessMonitor {
         ProcessMonitor::ghost_hunt_add_event(data.pid, data.clone());
     }
 
-    fn get_mtx_inner<'a>() -> FastMutexGuard<'a, BTreeMap<u64, Process>> {
+    fn get_mtx_inner<'a>() -> FastMutexGuard<'a, BTreeMap<u32, Process>> {
         // todo rather than panic, ? error
-        let process_lock: FastMutexGuard<BTreeMap<u64, Process>> =
+        let process_lock: FastMutexGuard<BTreeMap<u32, Process>> =
             match Grt::get_fast_mutex("ProcessMonitor") {
                 Ok(mtx) => match mtx.lock() {
                     Ok(l) => l,
@@ -449,7 +447,7 @@ unsafe extern "C" fn thread_run_monitor_ghost_hunting(_: *mut c_void) {
 ///
 /// This function is designed to be run on driver initialisation / setup to record what processes are running at the starting point.
 /// It may be possible, during the snapshot, a new process is started and is missed.
-fn walk_processes_get_details(processes: &mut BTreeMap<u64, Process>) {
+fn walk_processes_get_details(processes: &mut BTreeMap<u32, Process>) {
     // Offsets in bytes for Win11 24H2
     const ACTIVE_PROCESS_LINKS_OFFSET: usize = 0x1d8;
 
@@ -552,7 +550,7 @@ fn extract_process_details<'a>(process: *mut _EPROCESS) -> Result<Process, Drive
         ));
     }
 
-    let ppid = process_information.InheritedFromUniqueProcessId;
+    let ppid = process_information.InheritedFromUniqueProcessId as u32;
 
     Ok(Process {
         pid: pid as _,

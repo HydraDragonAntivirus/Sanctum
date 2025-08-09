@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct ProcessStarted {
     pub image_name: String,
     pub command_line: String,
-    pub parent_pid: u64,
-    pub pid: u64,
+    pub parent_pid: u32,
+    pub pid: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
