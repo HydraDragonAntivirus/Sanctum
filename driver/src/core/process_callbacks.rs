@@ -349,17 +349,10 @@ extern "C" fn image_load_callback(
     }
 
     // For now, only inject into these processes whilst we test
-    if !(name.contains("notepad.exe")
-        || name.contains("malware.exe")
-        || name.contains("powershell.exe"))
+    if !name.contains("malware.exe")
     {
         return;
     }
-
-    println!(
-        "Adding process: {:?}, pid: {}, base: {:p} to ImageLoadQueueForInjector to inject our dll!",
-        name, pid as usize, image_info.ImageBase
-    );
 
     ImageLoadQueueForInjector::queue_process_for_usermode(pid as usize);
 

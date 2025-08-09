@@ -162,7 +162,7 @@ impl ProcessMonitor {
 
             process.add_ghost_hunt_timer(GhostHuntingTimer {
                 timer_start: current_time,
-                cancellable_by: signal.nt_function.find_cancellable_apis_ghost_hunting(),
+                cancellable_by: 1,
                 event_type: signal.nt_function,
                 origin: signal.source,
                 weight: signal.evasion_weight,
@@ -213,31 +213,15 @@ impl ProcessMonitor {
 
                 let time_delta = unsafe { current_time.QuadPart - item.timer_start.QuadPart };
 
-                // if we are waiting on the ETW feed, it takes a little longer
-                if item.cancellable_by & SyscallEventSource::EventSourceEtw as isize
-                    == SyscallEventSource::EventSourceEtw as isize
-                {
-                    if time_delta > unsafe { max_time_allowed_etw.QuadPart } {
-                        // process.update_process_risk_score(item.weight);
-                        println!(
-                            "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
-                            item.event_type, process.pid
-                        );
+                if time_delta > unsafe { max_time_allowed.QuadPart } {
+                    // process.update_process_risk_score(item.weight);
+                    println!(
+                        "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
+                        item.event_type, process.pid
+                    );
 
-                        process.ghost_hunting_timers.remove(index);
-                        break;
-                    }
-                } else {
-                    if time_delta > unsafe { max_time_allowed.QuadPart } {
-                        // process.update_process_risk_score(item.weight);
-                        println!(
-                            "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
-                            item.event_type, process.pid
-                        );
-
-                        process.ghost_hunting_timers.remove(index);
-                        break;
-                    }
+                    process.ghost_hunting_timers.remove(index);
+                    break;
                 }
 
                 index += 1;

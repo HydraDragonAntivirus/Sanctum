@@ -32,6 +32,7 @@ static SYSCALL_PP_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
+#[derive(Debug)]
 pub enum Syscall {
     NtOpenProcess(NtOpenProcess),
     NtAllocateVirtualMemory(NtAllocateVirtualMemory),
@@ -54,8 +55,9 @@ impl KernelSyscallIntercept {
         // We want to match here on the SSN, and process each SSN as appropriate for 
         // our hooking needs.
         //
+        let rax = ktrap_frame.Rax as u32;
 
-        let syscall_data: Option<Syscall> = match ktrap_frame.Rax as u32 {
+        let syscall_data: Option<Syscall> = match rax {
             SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Self::nt_allocate_vm(ktrap_frame),
             SSN_NT_OPEN_PROCESS => Self::nt_open_process(ktrap_frame),
             _ => {
@@ -358,7 +360,7 @@ fn extract_queued_items() -> Option<VecDeque<KernelSyscallIntercept>>{
                 );
                 return None;
             }
-        };
+    };
 
     if lock.is_empty() {
         return None;
