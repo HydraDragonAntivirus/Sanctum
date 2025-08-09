@@ -126,14 +126,14 @@ impl ProcessMonitor {
     }
 
     pub fn onboard_new_process(process: &ProcessStarted) -> Result<(), ProcessErrors> {
-        let mut process_lock = ProcessMonitor::get_mtx_inner();
+        let mut process_monitor_lock = ProcessMonitor::get_mtx_inner();
 
-        if process_lock.get(&process.pid).is_some() {
+        if process_monitor_lock.get(&process.pid).is_some() {
             return Err(ProcessErrors::DuplicatePid);
         }
 
         // todo this actually needs filling out with the relevant data
-        process_lock.insert(process.pid, Process {
+        process_monitor_lock.insert(process.pid, Process {
             pid: process.pid,
             ppid: process.parent_pid,
             process_image: process.image_name.clone(),
@@ -150,7 +150,9 @@ impl ProcessMonitor {
     // todo need to remove processes from the monitor once they are terminated
     pub fn remove_process(pid: u32) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
-        process_lock.remove(&pid);
+        if process_lock.remove(&pid).is_none() {
+            println!("[sanctum] [-] Error removing process from active processes.");     
+        }
     }
 
     /// Notifies the Ghost Hunting management that a new huntable event has occurred.
