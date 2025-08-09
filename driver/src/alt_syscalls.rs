@@ -8,7 +8,7 @@
 //! The mechanism of post processing [`queue_syscall_post_processing`] is using queued `wdk_mutex` and offloading the work to a system worker thread within
 //! the driver, as to not degrade system performance.
 
-use core::{arch::asm, ffi::{c_void, CStr}, ptr::null_mut};
+use core::{arch::asm, ffi::{c_void, CStr}, ptr::null_mut, sync::atomic::{AtomicBool, Ordering}};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use wdk::{nt_success, println};
@@ -36,6 +36,8 @@ const NT_CREATE_SECTION_EX: u32 = 0x00c6;
 const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
 const NT_CREATE_FILE_SSN: u32 = 0x0055;
 const NT_TRACE_EVENT_SSN: u32 = 0x005e;
+
+pub static g_alt_syscalls_enabled: AtomicBool = AtomicBool::new(false);
 
 pub struct AltSyscalls;
 
@@ -251,11 +253,15 @@ impl AltSyscalls {
         status: AltSyscallStatus,
         isolated_processes: Option<&[&str]>,
     ) {
-        // Offsets in bytes for Win11 24H2
-        const ACTIVE_PROCESS_LINKS_OFFSET: usize = 0x1d8;
-        const UNIQUE_PROCESS_ID_OFFSET: usize = 0x1d0;
-        const THREAD_LIST_HEAD_OFFSET: usize = 0x370;
-        const THREAD_LIST_ENTRY_OFFSET: usize = 0x578;
+
+        match status {
+            AltSyscallStatus::Enable => {
+                g_alt_syscalls_enabled.store(true, Ordering::SeqCst);
+            },
+            AltSyscallStatus::Disable => {
+                g_alt_syscalls_enabled.store(false, Ordering::SeqCst);
+            },
+        }
 
         let current_process = unsafe { IoGetCurrentProcess() };
         if current_process.is_null() {
@@ -434,7 +440,8 @@ pub unsafe extern "system" fn syscall_handler(
 
     // todo remove once ready for mass testing
     let proc_name = get_process_name().to_lowercase();
-    if !proc_name.contains("malware") {
+    if !proc_name.contains("malware.e")
+    {
         return 1;
     }
 
@@ -447,8 +454,8 @@ pub unsafe extern "system" fn syscall_handler(
     };
 
     match ssn {
-        SSN_NT_ALLOCATE_VIRTUAL_MEMORY 
-            | SSN_NT_OPEN_PROCESS  => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
+        SSN_NT_OPEN_PROCESS => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
+        SSN_NT_ALLOCATE_VIRTUAL_MEMORY => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
         // 0x3a => {
         //     println!(
         //         "[Write virtual memory] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",

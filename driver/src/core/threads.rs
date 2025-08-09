@@ -3,17 +3,16 @@
 use core::{
     arch::asm,
     ffi::c_void,
-    ptr::null_mut,
+    ptr::null_mut, sync::atomic::Ordering,
 };
 
-use wdk::println;
+use wdk::{nt_success, println};
 use wdk_sys::{
-    BOOLEAN,
-    ntddk::PsSetCreateThreadNotifyRoutine,
+    ntddk::{ObfDereferenceObject, PsLookupThreadByThreadId, PsSetCreateThreadNotifyRoutine}, BOOLEAN, HANDLE, PETHREAD, PKTHREAD
 };
 
 use crate::{
-    alt_syscalls::{AltSyscallStatus, AltSyscalls},
+    alt_syscalls::{g_alt_syscalls_enabled, AltSyscallStatus, AltSyscalls},
     utils::thread_to_process_name,
 };
 
@@ -29,6 +28,9 @@ pub fn set_thread_creation_callback() {
 /// - Newly created threads which need analysis for signs of malicious behaviour
 /// - Setting up the AltSyscallHandler so that we can intercept syscalls kernel-side from usermode.
 ///
+/// **Note**, the thread ID of the newly created thread can be found in the `thread_id` parameter, and to look up its
+/// KTHREAD address, you must call into `PsLookupThreadByThreadId`.
+/// 
 /// # Args
 /// - pid: The process ID of the process.
 /// - thread_id: The thread ID of the thread.
@@ -39,20 +41,22 @@ pub unsafe extern "C" fn thread_callback(
     create: BOOLEAN,
 ) {
     let pid = pid as u32;
-    let thread_id = thread_id as u32;
+    let thread_id_u32 = thread_id as u32;
 
-    thread_reg_alt_callbacks();
+    if g_alt_syscalls_enabled.load(Ordering::SeqCst) {
+        thread_reg_alt_callbacks(thread_id);
+    }
 }
 
-pub fn thread_reg_alt_callbacks() {
-    let mut ke_thread: *mut c_void = null_mut();
+pub fn thread_reg_alt_callbacks(thread_id: *mut c_void) {
 
-    unsafe {
-        asm!(
-            "mov {}, gs:[0x188]",
-            out(reg) ke_thread,
-        )
-    };
+    let mut ke_thread: PETHREAD = null_mut();
+    let thread_result = unsafe { PsLookupThreadByThreadId(thread_id as HANDLE, &mut ke_thread) };
+
+    if !nt_success(thread_result) {
+        println!("[-] [sanctum] Failed to lookup thread ID.");
+        return;
+    }
 
     let thread_process_name = match thread_to_process_name(ke_thread as *mut _) {
         Ok(t) => t.to_lowercase(),
@@ -64,4 +68,6 @@ pub fn thread_reg_alt_callbacks() {
 
     AltSyscalls::configure_thread_for_alt_syscalls(ke_thread as *mut _, AltSyscallStatus::Enable);
     AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
+    
+    unsafe { ObfDereferenceObject(ke_thread as *mut _) };
 }
