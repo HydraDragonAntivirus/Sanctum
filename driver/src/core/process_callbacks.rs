@@ -45,12 +45,13 @@ pub unsafe extern "C" fn process_create_callback(
     //
 
     if !create_info.is_null() {
+        //
         // process started
+        //
 
-        let image_name = unicode_to_string((*create_info).ImageFileName);
-        let command_line = unicode_to_string((*create_info).CommandLine);
-        let parent_pid = (*create_info).ParentProcessId as u32;
-        // (*create_info).
+        let image_name = unicode_to_string(unsafe {(*create_info).ImageFileName});
+        let command_line = unicode_to_string(unsafe {(*create_info).CommandLine});
+        let parent_pid = unsafe { (*create_info).ParentProcessId as u32} ;
         let pid = pid as u32;
 
         if image_name.is_err() || command_line.is_err() {
@@ -78,7 +79,7 @@ pub unsafe extern "C" fn process_create_callback(
 
         // Set both bits: EnableReadVmLogging (bit 0) and EnableWriteVmLogging (bit 1)
         let mut logging_info = ProcessLoggingInformation { flags: 0x03 };
-        let result = unsafe {
+        let _ = unsafe {
             ZwSetInformationProcess(
                 process_handle,
                 87,
@@ -94,44 +95,18 @@ pub unsafe extern "C" fn process_create_callback(
             pid,
         };
 
-        if process_started.image_name.contains("otepad")
-            || process_started.image_name.contains("alware.ex")
-        {
-            println!(
-                "[sanctum] [i] Process of interest created, pid: {}, ppid: {}",
-                pid, parent_pid
-            );
-
-            // todo this is buggy af ?
-            if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
-                println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
-            };
-        }
-
-        // Attempt to dereference the DRIVER_MESSAGES global; if the dereference is successful,
-        // add the relevant data to the queue
-        // if !DRIVER_MESSAGES.load(Ordering::SeqCst).is_null() {
-        //     let obj = unsafe { &mut *DRIVER_MESSAGES.load(Ordering::SeqCst) };
-        //     obj.add_process_creation_to_queue(process_started);
-        // } else {
-        //     println!("[sanctum] [-] Driver messages is null");
-        // };
-    } else {
-        // process terminated
-
-        let pid = pid as u64;
-        let process_terminated = ProcessTerminated { pid };
-
-        // println!("[sanctum] [-] Process terminated, {:?}", process_terminated);
-
-        // Attempt to dereference the DRIVER_MESSAGES global; if the dereference is successful,
-        // add the relevant data to the queue
-        if !DRIVER_MESSAGES.load(Ordering::SeqCst).is_null() {
-            let obj = unsafe { &mut *DRIVER_MESSAGES.load(Ordering::SeqCst) };
-            obj.add_process_termination_to_queue(process_terminated);
-        } else {
-            println!("[sanctum] [-] Driver messages is null");
+        // Add the new process to the monitor
+        if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
+            println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
         };
+
+    } else {
+        //
+        // process terminated
+        //
+
+        let pid = pid as u32;
+        ProcessMonitor::remove_process(pid);
     }
 }
 
