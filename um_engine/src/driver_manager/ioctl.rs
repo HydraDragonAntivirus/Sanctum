@@ -9,14 +9,11 @@ use shared_no_std::{
     driver_ipc::ImageLoadQueues,
     ghost_hunting::Syscall,
     ioctl::{
-        DriverMessages, SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_SYSCALL,
-        SANC_IOCTL_DRIVER_GET_IMAGE_LOADS, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN,
-        SANC_IOCTL_DRIVER_GET_MESSAGE_LEN, SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING,
-        SANC_IOCTL_PING_WITH_STRUCT, SancIoctlPing,
+        BaseAddressesOfMonitoredDlls, DriverMessages, SancIoctlPing, SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT, SANC_IOCTL_SEND_BASE_ADDRS
     },
 };
 use std::{ffi::c_void, slice::from_raw_parts};
-use windows::Win32::System::IO::DeviceIoControl;
+use windows::{core::w, Win32::System::{LibraryLoader::GetModuleHandleW, IO::DeviceIoControl}};
 
 impl SanctumDriverManager {
     /// Checks the driver compatibility between the driver and user mode applications.
@@ -80,6 +77,57 @@ impl SanctumDriverManager {
         }
 
         response
+    }
+
+    /// Sends an IOCTL to the driver to the base addresses of ntdll.dll and kernel32.dll
+    pub(super) fn ioctl_send_base_addresses(&mut self) {
+        if self.handle_via_path.handle.is_none() {
+            // try 1 more time
+            self.init_handle_via_registry();
+            if self.handle_via_path.handle.is_none() {
+                self.log.log(LogLevel::Error, &format!(
+                    "Handle to the driver is not initialised; please ensure you have started / installed the service. \
+                    Unable to pass IOCTL. Handle: {:?}. Exiting the driver.", 
+                    self.handle_via_path.handle
+                ));
+
+                // stop the driver then panic
+                self.stop_driver();
+
+                // todo in the future have some gui option instead of a panic
+                self.log.panic("Unable to communicate with the driver to check version compatibility, please try again.")
+            }
+        }
+
+        let k32_base = unsafe { GetModuleHandleW(w!("Kernel32.dll")) }.expect("Could not get k32 handle").0 as usize;
+        let ntdll_base = unsafe { GetModuleHandleW(w!("ntdll.dll")) }.expect("Could not get ntdll handle").0 as usize;
+
+        let data = BaseAddressesOfMonitoredDlls {
+            kernel32: k32_base,
+            ntdll: ntdll_base,
+        };
+
+        let result = unsafe {
+            DeviceIoControl(
+                self.handle_via_path.handle.unwrap(),
+                SANC_IOCTL_SEND_BASE_ADDRS,
+                Some(&data as *const _ as *const c_void),
+                size_of_val(&data) as u32,
+                None,
+                0,
+                None,
+                None,
+            )
+        };
+
+        // error checks
+        if let Err(e) = result {
+            self.log.log(
+                LogLevel::Error,
+                &format!("Error fetching version result from driver. {e}"),
+            );
+            return;
+        }
     }
 
     /// Ping the driver from usermode

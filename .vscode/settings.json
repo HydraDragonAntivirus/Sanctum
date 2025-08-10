@@ -85,6 +85,7 @@
         "PROCESSINFOCLASS",
         "PSECURITY",
         "PSTR",
+        "ptrs",
         "PUNICODE",
         "PWSTR",
         "Raii",

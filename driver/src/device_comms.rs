@@ -180,16 +180,16 @@ impl DriverMessagesWithMutex {
     }
 }
 
-struct IoctlBuffer {
-    len: u32,
-    buf: *mut c_void,
-    p_stack_location: *mut _IO_STACK_LOCATION,
-    pirp: PIRP,
+pub struct IoctlBuffer {
+    pub len: u32,
+    pub buf: *mut c_void,
+    pub p_stack_location: *mut _IO_STACK_LOCATION,
+    pub pirp: PIRP,
 }
 
 impl IoctlBuffer {
     /// Creates a new instance of the IOCTL buffer type
-    fn new(p_stack_location: *mut _IO_STACK_LOCATION, pirp: PIRP) -> Self {
+    pub fn new(p_stack_location: *mut _IO_STACK_LOCATION, pirp: PIRP) -> Self {
         IoctlBuffer {
             len: 0,
             buf: null_mut(),
@@ -228,7 +228,7 @@ impl IoctlBuffer {
     /// Success: a IoctlBuffer which will hold the length and a pointer to the buffer
     ///
     /// Error: NTSTATUS
-    fn receive(&mut self) -> Result<(), NTSTATUS> {
+    pub fn receive(&mut self) -> Result<(), NTSTATUS> {
         // length of in buffer
         let input_len: u32 = unsafe {
             (*self.p_stack_location)

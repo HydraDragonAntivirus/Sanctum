@@ -3,7 +3,7 @@
 use core::{ffi::c_void, ptr::null_mut};
 
 use wdk_sys::{
-    ntddk::{KeGetCurrentIrql, KeInitializeEvent}, ACCESS_MASK, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE, PIO_STACK_LOCATION, PIRP, POBJECT_ATTRIBUTES, PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG, _EVENT_TYPE::SynchronizationEvent
+    ntddk::{KeGetCurrentIrql, KeInitializeEvent}, ACCESS_MASK, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, LIST_ENTRY, NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE, PIO_STACK_LOCATION, PIRP, POBJECT_ATTRIBUTES, PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG, _EVENT_TYPE::SynchronizationEvent
 };
 
 pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
@@ -184,4 +184,21 @@ pub struct IMAGE_EXPORT_DIRECTORY {
     pub AddressOfFunctions: u32,
     pub AddressOfNames: u32,
     pub AddressOfNameOrdinals: u32,
+}
+
+#[repr(C)]
+pub struct PEB {
+
+    pub Reserved1: [u8; 2],
+    pub BeingDebugged: u8,
+    pub Reserved2: [u8; 1],
+    pub Reserved3: [*mut c_void; 2],
+    pub Ldr: *mut PEB_LDR_DATA,
+}
+
+#[repr(C)]
+pub struct PEB_LDR_DATA {
+    pub Reserved1: [u8; 8],
+    pub Reserved2: [*mut c_void; 3],
+    pub InMemoryOrderModuleList: LIST_ENTRY,
 }

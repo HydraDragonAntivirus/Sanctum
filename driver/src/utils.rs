@@ -499,15 +499,19 @@ pub fn get_process_name() -> String {
 
 /// Scan a module by its in memory base address for function offsets. The target param should NOT be null
 /// terminated.
-pub fn scan_usermode_module_for_function_address(
+/// 
+/// # Safety
+/// The caller is responsible for ensuring the `base` address points to valid expected memory (base address of the loaded
+/// module).
+pub unsafe fn scan_usermode_module_for_function_address(
     base: *const c_void,
     target: &str,
 ) -> Result<*const c_void, DriverError>{
     // The memory should always be valid.. but.. Cannot use ProbeForRead as we don't
     // have access to __try :( this is as close as I can get right now I think
-    if unsafe { MmIsAddressValid(base as _) } == FALSE as u8 {
-        println!("[sanctum [-] Address of ntdll not valid.");
-        return Err(DriverError::ResourceStateInvalid);
+    if base.is_null() {
+        println!("[sanctum [-] Address not valid.");
+        return Err(DriverError::NullPtr);
     }
 
     let dos = unsafe { &*(base as *const IMAGE_DOS_HEADER) };

@@ -14,17 +14,15 @@
 //!   Ghost Hunting telemetry
 
 use core::{
-    arch::asm, ffi::c_void, mem::replace, ptr::null_mut, time::Duration
+    ffi::c_void, iter::once, ptr::null_mut, sync::atomic::{AtomicPtr, Ordering}, time::Duration
 };
 
 use alloc::{
-    collections::btree_map::BTreeMap,
-    string::{String, ToString},
-    vec::Vec,
+    boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, vec::Vec
 };
 use shared_no_std::{
     driver_ipc::ProcessStarted,
-    ghost_hunting::{NtFunction, Syscall, SyscallEventSource},
+    ghost_hunting::{NtFunction, Syscall, SyscallEventSource}, ioctl::BaseAddressesOfMonitoredDlls,
 };
 use wdk::{nt_success, println};
 use wdk_mutex::{
@@ -34,14 +32,22 @@ use wdk_mutex::{
 };
 use wdk_sys::{
     ntddk::{
-        IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise, MmIsAddressValid, ObOpenObjectByPointer, ObReferenceObjectByHandle, PsCreateSystemThread, PsGetCurrentThreadTeb, PsGetProcessId
-    }, PsProcessType, FALSE, HANDLE, LARGE_INTEGER, LIST_ENTRY, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, _EPROCESS, _LARGE_INTEGER, _MODE::KernelMode, _PEB
+        IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise, MmMapViewInSystemSpace, MmUnmapViewInSystemSpace, ObOpenObjectByPointer, ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, PsGetProcessId, RtlInitUnicodeString, ZwClose, ZwOpenSection
+    }, PsProcessType, HANDLE, LARGE_INTEGER, LIST_ENTRY, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PIRP, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, SECTION_MAP_READ, SECTION_QUERY, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, UNICODE_STRING, _EPROCESS, _IO_STACK_LOCATION, _LARGE_INTEGER, _MODE::KernelMode
 };
 
 use crate::{
-    ffi::{NtQueryInformationProcess, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS64},
-    utils::{eprocess_to_process_name, scan_usermode_module_for_function_address, DriverError},
+    device_comms::IoctlBuffer, ffi::{InitializeObjectAttributes, NtQueryInformationProcess}, utils::{eprocess_to_process_name, scan_usermode_module_for_function_address, DriverError}
 };
+
+pub static MONITORED_FN_PTRS: AtomicPtr<MonitoredApis> = AtomicPtr::new(null_mut());
+
+#[derive(Debug)]
+pub struct MonitoredApis {
+    /// A BTreeMap containing the function's virtual address as a usize,
+    /// and a tuple of (dll name, and the API as a [`SensitiveAPI`])
+    inner: BTreeMap<usize, (String, SensitiveAPI)>
+}
 
 /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
 /// onto it, can be tracked and monitored.
@@ -75,9 +81,9 @@ pub struct LoadedModules {
     inner: BTreeMap<String, LoadedModule>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum SensitiveAPI {
-    LdrLoadDLL,
+    LdrLoadDll,
     LoadLibraryA,
     LoadLibraryW,
 }
@@ -87,22 +93,16 @@ pub enum SensitiveAPI {
 pub struct LoadedModule {
     image_base: *const c_void,
     image_sz: usize,
-    ntdll_addresses: Option<NtdllAddresses>,
-    kernel32_addresses: Option<Kernel32Addresses>,
 }
 
 impl LoadedModule {
     pub fn new(
         image_base: *const c_void,
         image_sz: usize,
-        ntdll_addresses: Option<NtdllAddresses>,
-        kernel32_addresses: Option<Kernel32Addresses>,
     ) -> Self {
         Self {
             image_base,
             image_sz,
-            ntdll_addresses,
-            kernel32_addresses,
         }
     }
 }
@@ -110,7 +110,7 @@ impl LoadedModule {
 /// Addresses within NTDLL that we care about detecting access to.
 #[derive(Debug)]
 pub struct NtdllAddresses {
-    pub LdrLoadDLL: *const c_void,
+    pub LdrLoadDll: *const c_void,
 }
 
 /// Addresses within NTDLL that we care about detecting access to.
@@ -220,11 +220,6 @@ impl ProcessMonitor {
         pid: u32,
     ) {
 
-        // Lookup any relevant addresses in NTDLL and Kernel32.dll that we want to look for at runtime
-        // with the EDR whilst spending time on a kernel thread. If we make this lookup once per image, it 
-        // should be in the long run, less expensive.
-        get_monitored_dll_address_fn_addrs(&mut lm, image_name);
-
         let mut process_lock = ProcessMonitor::get_mtx_inner();
 
         let process = match process_lock.get_mut(&pid) {
@@ -245,35 +240,17 @@ impl ProcessMonitor {
     }
 
     pub fn fn_pointer_to_sensitive_address(pid: u32, requested_addr: *const c_void) -> Option<SensitiveAPI> {
-        let process_lock = ProcessMonitor::get_mtx_inner();
 
-        if let Some(process ) = process_lock.get(&pid) {
-            match &process.loaded_modules {
-                Some(lm) => {
-                    for (_, module_info) in &lm.inner {
-                         if let Some(info) = &module_info.kernel32_addresses {
-                            if info.LoadLibraryA == requested_addr {
-                                return Some(SensitiveAPI::LoadLibraryA);
-                            }
-                            if info.LoadLibraryW == requested_addr {
-                                return Some(SensitiveAPI::LoadLibraryW);
-                            }
-                         } else if let Some(info) = &module_info.ntdll_addresses {
-                            if info.LdrLoadDLL == requested_addr {
-                                return Some(SensitiveAPI::LdrLoadDLL);
-                            }
-                         }
-                    }
-                },
-                None => {
-                    println!("[sanctum] [-] process.loaded_modules was none.");
-                    println!("{process:#?}");
-                    return None
-                },
-            };
+        let monitored_fn_ptrs = MONITORED_FN_PTRS.load(Ordering::SeqCst);
+        if monitored_fn_ptrs.is_null() {
+            println!("[sanctum] [-] Monitored fn ptrs was null, this should be reported.");
+            // todo send telemetry
+            return None;
         }
 
-        println!("[sanctum] [-] Could not lock process monitor for fn_pointer_to_sensitive_address");
+        if let Some((_, api)) = unsafe { &*monitored_fn_ptrs }.inner.get(&(requested_addr as usize)) {
+            return Some(*api);
+        }
 
         None
     }
@@ -632,6 +609,7 @@ fn walk_processes_get_details(processes: &mut BTreeMap<u32, Process>) {
 /// - parent pid
 /// - image name (not full path)
 fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Process, DriverError> {
+
     let process_name = eprocess_to_process_name(process as *mut _)?;
     let mut out_sz = 0;
 
@@ -697,45 +675,134 @@ fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Pr
     })
 }
 
-/// Lookup the addresses of functions we wish to monitor abuse against, populating the [`LoadedModule`]
-/// struct mutably.
-/// 
-/// `image_name` is the name of the image being loaded.
-fn get_monitored_dll_address_fn_addrs(lm: &mut LoadedModule, image_name: &String) {
+pub fn set_monitored_dll_fn_ptrs(
+    p_stack_location: *mut _IO_STACK_LOCATION,
+    pirp: PIRP,
+) {
+    let mut ioctl_buffer = IoctlBuffer::new(p_stack_location, pirp);
+    match ioctl_buffer.receive() {
+        Ok(i) => i,
+        Err(_) => return,
+    };
 
-    if image_name.to_lowercase().contains(r"\windows\system32\ntdll.dll") {
-        let ldr_ld_dll = scan_usermode_module_for_function_address(
-            lm.image_base,
-            "LdrLoadDLL"
-        );
-
-        if ldr_ld_dll.is_ok() {
-            lm.ntdll_addresses = Some(
-                NtdllAddresses {
-                    LdrLoadDLL: ldr_ld_dll.unwrap(),
-                }
-            )
-        }
+    let input_data = ioctl_buffer.buf as *const _ as *const BaseAddressesOfMonitoredDlls;
+    if input_data.is_null() {
+        println!("[sanctum] [-] Error receiving input data for setting monitored DLL addresses.");
+        return;
     }
 
-    if image_name.to_lowercase().contains(r"\windows\system32\kernel32.dll") {
-        let lla = scan_usermode_module_for_function_address(
-            lm.image_base,
-            "LoadLibraryA"
-        );
-        let llw = scan_usermode_module_for_function_address(
-            lm.image_base,
-            "LoadLibraryW"
-        );
+    let input_data: &BaseAddressesOfMonitoredDlls = unsafe { &*input_data };
 
-        if lla.is_ok() && llw.is_ok() {
-            lm.kernel32_addresses = Some(
-                Kernel32Addresses {
-                    LoadLibraryW: llw.unwrap(),
-                    LoadLibraryA: lla.unwrap(),
-                }
-            )
-        }
+    let ldr_load_dll_rva = extract_monitored_user_fn_ptrs_as_rva(
+        r"\KnownDlls\ntdll.dll",
+        "LdrLoadDll"
+    );
+    let lla = extract_monitored_user_fn_ptrs_as_rva(
+        r"\KnownDlls\kernel32.dll",
+        "LoadLibraryA"
+    );
+    let llw = extract_monitored_user_fn_ptrs_as_rva(
+        r"\KnownDlls\kernel32.dll",
+        "LoadLibraryW"
+    );
+
+    if ldr_load_dll_rva.is_none() || lla.is_none() || llw.is_none() {
+        println!("[sanctum] [!!] FATAL: An expected DLL offset was None. Cannot continue. \
+        {ldr_load_dll_rva:?}, {lla:?}, {llw:?}\
+        ");
+        panic!()
     }
+
+    let ldr_load_dll = ldr_load_dll_rva.unwrap() + input_data.ntdll;
+    let lla = lla.unwrap() + input_data.kernel32;
+    let llw = llw.unwrap() + input_data.kernel32;
+
+    let mut btm = BTreeMap::new();
+    btm.insert(ldr_load_dll, ("ntdll.dll".to_string(), SensitiveAPI::LdrLoadDll));
+    btm.insert(lla, ("kernel32.dll".to_string(), SensitiveAPI::LoadLibraryA));
+    btm.insert(llw, ("kernel32.dll".to_string(), SensitiveAPI::LoadLibraryW));
+
+    let apis = Box::new(
+        MonitoredApis {
+            inner: btm,
+        }
+    );
+
+    let apis = Box::into_raw(apis);
+    
+    MONITORED_FN_PTRS.store(apis, Ordering::SeqCst);
+
+}
+
+fn extract_monitored_user_fn_ptrs_as_rva(
+    path: &str, name: &str
+) -> Option<usize> {
+    let mut handle: *mut c_void = null_mut();
+    let u16buf: alloc::vec::Vec<u16> = path.encode_utf16().chain(once(0)).collect();
+    let mut us_path = UNICODE_STRING::default();
+    unsafe { RtlInitUnicodeString(&mut us_path, u16buf.as_ptr()) };
+    
+    let mut oa: OBJECT_ATTRIBUTES = OBJECT_ATTRIBUTES::default();
+    if let Err(_)  = unsafe { InitializeObjectAttributes(
+        &mut oa, 
+        &mut us_path,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        null_mut(),
+        null_mut(),
+    ) } {
+        println!("[sanctum] [-] Error with object attributes.");
+        return None;
+    }
+
+    let result = unsafe { ZwOpenSection(&mut handle, SECTION_QUERY | SECTION_MAP_READ, &mut oa) };
+    if !nt_success(result) {
+        println!("[sanctum] [-] Failed to call ZwOpenSection. E: {result:#?}");
+        let _ = unsafe { ZwClose(handle) };
+        return None;
+    }
+
+    let mut section_obj: *mut c_void = null_mut();
+    let status = unsafe { ObReferenceObjectByHandle(
+        handle,
+        SECTION_MAP_READ,
+        null_mut(),
+        KernelMode as _,
+        &mut section_obj,
+        null_mut(),
+    ) };
+    if !nt_success(status) {
+        let _ = unsafe { ZwClose(handle) };
+        println!("[sanctum] [-] ObReferenceObjectByHandle bad call.");
+        return None;
+    }
+
+    let mut base: *mut c_void = null_mut();
+    let mut view_size: u64 = 0;
+
+    let result = unsafe { MmMapViewInSystemSpace(section_obj, &mut base, &mut view_size) };
+    if !nt_success(result) || base.is_null() {
+        println!("[sanctum] [-] Failed to call MmMapViewInSystemSpace. E: {result:#?}");
+        let _ = unsafe { ObfDereferenceObject(section_obj) };
+        let _ = unsafe { ZwClose(handle) };
+        return None;
+    }
+
+    let result_absolute = unsafe { scan_usermode_module_for_function_address(
+        base, 
+        name,
+    ) };
+
+    let _ = unsafe { MmUnmapViewInSystemSpace(base) };
+    let _ = unsafe { ObfDereferenceObject(section_obj) };
+    let _ = unsafe { ZwClose(handle) };
+
+    let kernel_absolute = match result_absolute {
+        Ok(abs) => abs,
+        Err(_) => return None,
+    };
+
+    let relative: usize = kernel_absolute as usize - base as usize;
+
+    Some(relative)
 
 }

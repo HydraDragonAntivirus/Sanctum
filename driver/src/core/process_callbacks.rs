@@ -297,8 +297,6 @@ extern "C" fn image_load_callback(
         let lm = LoadedModule::new(
             image_info.ImageBase as _, 
             image_info.ImageSize as _, 
-            None,
-            None
         );
 
         ProcessMonitor::add_loaded_module(lm, &name, pid as u32);

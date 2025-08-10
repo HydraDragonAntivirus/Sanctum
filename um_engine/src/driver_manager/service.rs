@@ -189,6 +189,8 @@ impl SanctumDriverManager {
             return;
         }
 
+        self.ioctl_send_base_addresses();
+
         self.state = DriverState::Started("".to_string());
 
         self.log

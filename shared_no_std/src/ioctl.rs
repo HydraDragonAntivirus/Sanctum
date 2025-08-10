@@ -48,7 +48,17 @@ pub const SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN: u32 =
 pub const SANC_IOCTL_DLL_SYSCALL: u32 =
     CTL_CODE!(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
+pub const SANC_IOCTL_SEND_BASE_ADDRS: u32 =
+    CTL_CODE!(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS);
+
 // ****************** IOCTL MSG STRUCTS ******************
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct BaseAddressesOfMonitoredDlls {
+    pub kernel32: usize,
+    pub ntdll: usize,
+}
 
 /// Response to a hello ping from usermode, indicates whether the data was received, and the driver
 /// will respond with its current version.
