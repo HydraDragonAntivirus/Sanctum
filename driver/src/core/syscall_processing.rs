@@ -9,7 +9,7 @@ use core::{
 };
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString, vec::Vec};
-use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, Syscall};
+use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall};
 use wdk::{nt_success, println};
 use wdk_mutex::{
     fast_mutex::FastMutexGuard,
@@ -124,9 +124,25 @@ impl KernelSyscallIntercept {
     ) -> Option<Syscall> {
 
         let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+        let dest_pid = handle_to_pid(ktrap_frame.Rcx as *mut c_void);
 
+        // For now, we are not interested in self memory writes
+        if current_pid == dest_pid {
+            return None;
+        }
 
-         None
+        let data = Syscall::from_kernel(
+            current_pid, 
+            NtFunction::NtWriteVirtualMemory(
+                NtWriteVirtualMemoryData {
+                    target_pid: dest_pid,
+                    base_address: ktrap_frame.Rdx as usize,
+                    buf_len: ktrap_frame.R9 as usize,
+                }
+            )
+        );
+
+        Some(data)
     }
 
     fn nt_open_process(
@@ -193,8 +209,6 @@ impl KernelSyscallIntercept {
                 }
             )
         );
-
-        println!("Sd: {syscall_data:?}");
 
         Some(syscall_data)
     }
