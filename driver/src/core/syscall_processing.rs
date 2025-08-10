@@ -2,13 +2,13 @@
 
 use core::{
     ffi::c_void,
-    mem,
+    mem::{self, MaybeUninit},
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicPtr, Ordering},
     time::Duration,
 };
 
-use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use alloc::{collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, Syscall};
 use wdk::{nt_success, println};
 use wdk_mutex::{
@@ -21,7 +21,54 @@ use wdk_sys::{
     }, CLIENT_ID, FALSE, HANDLE, KTRAP_FRAME, LARGE_INTEGER, STATUS_SUCCESS, THREAD_ALL_ACCESS, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
-use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS}, core::process_monitor::ProcessMonitor, utils::{handle_to_pid, DriverError}};
+use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS, SSN_NT_WRITE_VM}, core::process_monitor::ProcessMonitor, utils::{handle_to_pid, DriverError}};
+
+/// Returns a borrowed view over stack argument slots saved in a `_KTRAP_FRAME`.
+/// The slice elements are interpreted as raw pointer-width values (`*const c_void`)
+/// so the caller can cast each slot appropriately.
+/// 
+/// **This does not allocate or copy.**
+/// 
+/// # Returns
+/// A slice of length `n` over the stack slots starting at an ABI-dependent offset
+/// from `ktrap.Rsp`. Each element is a pointer-width value (8 bytes on x64)
+/// that may represent either a pointer or an integer value placed on the stack.
+/// 
+/// # Safety
+/// - `ktrap.Rsp` must refer to a valid, readable stack frame with at least `n`
+///   8-byte slots available.
+/// - The returned slice aliases memory owned by the trapped thread; do **not**
+///   persist it beyond immediate use, you must clone or copy any such data.
+/// - If the slots correspond to **user-mode** stack memory, ensure you are at a
+///   safe IRQL and use appropriate probing/copy patterns before dereferencing
+///   user pointers. Creating the slice itself is safe, but dereferencing what it
+///   points to may fault.
+/// - Do **not** dereference `*const c_void` directly; cast to a concrete pointer type first.
+/// - If you need any data to **persist** which is NOT copy, it must be cloned.
+/// 
+/// # Examples
+/// ```ignore
+/// // Borrow 2 stack slots (e.g., the 5th and 6th overall args if the first four were in regs)
+/// let slots = unsafe { ktrap_get_stack_args(&ktrap_frame, 2) };
+///
+/// // Reading an integer value (<= 64 bits) that was passed on the stack:
+/// let val_u32: u32 = slots[0] as u322;            // interpret slot value as integer
+///
+/// // Reading through a pointer that was on the stack:
+/// let p_u32 = slots[1] as *const u32;             // cast the slot to a typed pointer
+/// let deref_u32 = unsafe { *p_u32 };              // now dereference
+/// ```
+unsafe fn ktrap_get_stack_args<'a>(
+    ktrap: &'a KTRAP_FRAME,
+    n: usize,
+) -> &'a [*const c_void] {
+    // The offset to the start of the stack args as per ABI
+    const STARTING_OFFSET: usize = 5;
+
+    let base = unsafe { (ktrap.Rsp as *const *const c_void).add(STARTING_OFFSET) };
+    unsafe { alloc::slice::from_raw_parts(base, n) }
+}
+
 
 /// Indicates whether the [`SyscallPostProcessor`] system is active or not. Active == true.
 /// Using a static atomic as we cannot explicitly get a handle to a SyscallPostProcessor if it does not
@@ -59,6 +106,7 @@ impl KernelSyscallIntercept {
         let syscall_data: Option<Syscall> = match rax {
             SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Self::nt_allocate_vm(ktrap_frame),
             SSN_NT_OPEN_PROCESS => Self::nt_open_process(ktrap_frame),
+            SSN_NT_WRITE_VM => Self::nt_write_vm(ktrap_frame),
             _ => {
                 println!("[-] [sanctum] Unknown SSN received, {:?}", ktrap_frame.Rax as u32);
                 None
@@ -69,6 +117,16 @@ impl KernelSyscallIntercept {
         if let Some(syscall_data) = syscall_data {
             SyscallPostProcessor::push(syscall_data);
         }
+    }
+
+    fn nt_write_vm(
+        ktrap_frame: KTRAP_FRAME,
+    ) -> Option<Syscall> {
+
+        let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+
+
+         None
     }
 
     fn nt_open_process(
@@ -118,13 +176,10 @@ impl KernelSyscallIntercept {
         let base_address = ktrap_frame.Rdx as *const c_void;
         let sz = ktrap_frame.R9 as usize;
 
-        // Get the stack args, starting at an offset of 5 (pointer sz)
-        let alloc_type = unsafe { 
-            *((ktrap_frame.Rsp as *const usize).add(5) as *const u32) 
-        };
-        let protect_flags = unsafe { 
-            *((ktrap_frame.Rsp as *const usize).add(6) as *const u32) 
-        };
+        let stack_args = unsafe { ktrap_get_stack_args(&ktrap_frame, 2) };
+        // SAFETY: These are copy, so suitable for directly inserting into the struct to keep around
+        let alloc_type = stack_args[0] as u32;
+        let protect_flags = stack_args[1] as u32;
         
         let syscall_data = Syscall::from_kernel(
             current_pid, 
@@ -138,6 +193,8 @@ impl KernelSyscallIntercept {
                 }
             )
         );
+
+        println!("Sd: {syscall_data:?}");
 
         Some(syscall_data)
     }

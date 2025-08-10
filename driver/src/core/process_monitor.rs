@@ -236,13 +236,8 @@ impl ProcessMonitor {
             //
             // Iterate over each Ghost Hunting timer that is active on the process. If the timer exceeds the permitted
             // wait time, aka it appears as though Hells Gate etc is being used, then.. todo.
-            // 
-            // Otherwise, we keep the timer on the process. To keep the borrow checker happy, we push the timers that are
-            // untouched to a new temp vector, and use a core::mem::replace to swap ownership of the data. This allows us to
-            // iterate over the timers mutably, whilst in effect, altering them in place and preserving the order (which is important
-            // as the older timers will be towards the beginning of the vec, so that needs to match other signals), otherwise we will
-            // get a lot of false alerts on timer mismatches. Theres some unavoidable cloning going on here, but I dont think the footprint
-            // of the clones should be too much of a problem.
+            //
+            // We can use the `extract_if` unstable API for `Vec`
             //
             
             for expired_timer in process.ghost_hunting_timers.extract_if(.., |t| {
