@@ -2,14 +2,14 @@
 
 use core::{
     ffi::c_void,
-    mem::{self, MaybeUninit},
+    mem::{self},
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicPtr, Ordering},
     time::Duration,
 };
 
-use alloc::{collections::vec_deque::VecDeque, string::ToString, vec::Vec};
-use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall};
+use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtCreateThreadExData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall};
 use wdk::{nt_success, println};
 use wdk_mutex::{
     fast_mutex::FastMutexGuard,
@@ -21,7 +21,7 @@ use wdk_sys::{
     }, CLIENT_ID, FALSE, HANDLE, KTRAP_FRAME, LARGE_INTEGER, STATUS_SUCCESS, THREAD_ALL_ACCESS, _KWAIT_REASON::Executive, _MODE::KernelMode
 };
 
-use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_OPEN_PROCESS, SSN_NT_WRITE_VM}, core::process_monitor::ProcessMonitor, utils::{handle_to_pid, DriverError}};
+use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_CREATE_THREAD_EX, SSN_NT_OPEN_PROCESS, SSN_NT_WRITE_VM}, core::process_monitor::ProcessMonitor, utils::{handle_to_pid, DriverError}};
 
 /// Returns a borrowed view over stack argument slots saved in a `_KTRAP_FRAME`.
 /// The slice elements are interpreted as raw pointer-width values (`*const c_void`)
@@ -107,6 +107,7 @@ impl KernelSyscallIntercept {
             SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Self::nt_allocate_vm(ktrap_frame),
             SSN_NT_OPEN_PROCESS => Self::nt_open_process(ktrap_frame),
             SSN_NT_WRITE_VM => Self::nt_write_vm(ktrap_frame),
+            SSN_NT_CREATE_THREAD_EX => Self::nt_create_thread_ex(ktrap_frame),
             _ => {
                 println!("[-] [sanctum] Unknown SSN received, {:?}", ktrap_frame.Rax as u32);
                 None
@@ -117,6 +118,67 @@ impl KernelSyscallIntercept {
         if let Some(syscall_data) = syscall_data {
             SyscallPostProcessor::push(syscall_data);
         }
+    }
+
+    fn nt_create_thread_ex(
+        ktrap_frame: KTRAP_FRAME,
+    ) -> Option<Syscall> {
+
+        let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
+        let dest_pid = handle_to_pid(ktrap_frame.R9 as *mut c_void);
+
+        // For now, we are not interested in self thread creates
+        if current_pid == dest_pid {
+            return None;
+        }
+
+        let stack_args = unsafe { ktrap_get_stack_args(&ktrap_frame, 2) };
+        // SAFETY: Reading two arguments, within limits from the call to ktrap_get_stack_args
+        let start_address = stack_args[0];
+        let argument = stack_args[1];
+
+        //
+        // With the NtCreateThread API, before permitting the syscall to continue, we want to do some sanitisation
+        // at this point. I accept this is perhaps not a realistic approach, and we would do this on the telemetry server
+        // as post-processing; BUT this is a POC and this EDR is designed for 'paranoid mode'. Perhaps in the future we can have
+        // different settings on the EDR: Paranoid, Casual Blocking, Report Only, etc.
+        //
+        // First - we need to check there are no outstanding Ghost Hunt's on the process from within the driver; this is to outright
+        // prevent Hell's Gate type syscall malware behaviour. There is no realistic valid reason for a process to be doing direct
+        // / indirect syscalls..
+        //
+        // Second, we need to determine what the thread is pointing to, is it to:
+        // - Classic library loading API's?
+        // - To a shellcode stub?
+        // - To a valid routine within the process image's .text section?
+        //
+        // We can access the loaded modules through the image callback in the driver
+        //
+        // Whilst the second listed checks above wont be slow in isolation, at scale, this could impact performance. An interesting debate
+        // for the future. For now, I want to do these checks at 'syscall-time'.
+        //
+
+        if let Some(resolved) = ProcessMonitor::fn_pointer_to_sensitive_address(
+            dest_pid, 
+            start_address
+        ) {
+            println!("**** WARNING: Sensitive API detected in start thread!! {resolved:?}");
+        }
+
+
+        println!("Start: {start_address:p}, arg: {argument:p}");
+
+        let data = Syscall::from_kernel(
+            current_pid, 
+            NtFunction::NtCreateThreadEx(NtCreateThreadExData {
+            target_pid: dest_pid,
+            start_routine: start_address as usize,
+            argument: argument as usize,
+        }));
+
+        println!("Data from NtCreateThreadEx: {data:?}");
+
+        Some(data)
     }
 
     fn nt_write_vm(

@@ -64,6 +64,7 @@ pub enum NtFunction {
     NtOpenProcess(NtOpenProcessData),
     NtWriteVirtualMemory(NtWriteVirtualMemoryData),
     NtAllocateVirtualMemory(NtAllocateVirtualMemoryData),
+    NtCreateThreadEx(NtCreateThreadExData),
 }
 
 /// todo docs
@@ -81,7 +82,6 @@ pub struct NtWriteVirtualMemoryData {
     pub buf_len: usize,
 }
 
-
 unsafe impl Send for Syscall {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -94,7 +94,8 @@ pub struct NtAllocateVirtualMemoryData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct NtOpenProcess {
+pub struct NtCreateThreadExData {
     pub target_pid: u32,
-    pub acces_mask: u32,
+    pub start_routine: usize,
+    pub argument: usize,
 }

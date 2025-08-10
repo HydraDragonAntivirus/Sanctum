@@ -12,13 +12,12 @@ use shared_no_std::constants::SanctumVersion;
 use wdk::println;
 use wdk_sys::{
     ntddk::{
-        IoThreadToProcess, KeGetCurrentIrql, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetProcessId, RtlInitUnicodeString, RtlUnicodeStringToAnsiString, ZwClose, ZwCreateFile, ZwWriteFile
+        IoThreadToProcess, KeGetCurrentIrql, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetProcessId, RtlInitUnicodeString, RtlUnicodeStringToAnsiString, ZwClose, ZwCreateFile, ZwWriteFile
     }, PsProcessType, DRIVER_OBJECT, FALSE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_OPEN_IF, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, LIST_ENTRY, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PASSIVE_LEVEL, PETHREAD, PHANDLE, POBJECT_ATTRIBUTES, PROCESS_ALL_ACCESS, PVOID, STATUS_SUCCESS, STRING, ULONG, UNICODE_STRING, _EPROCESS, _KPROCESS, _KTHREAD, _MODE::KernelMode
 };
 
 use crate::{
-    DRIVER_MESSAGES,
-    ffi::{InitializeObjectAttributes, PsGetProcessImageFileName},
+    ffi::{InitializeObjectAttributes, PsGetProcessImageFileName, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS64}, DRIVER_MESSAGES
 };
 
 #[derive(Debug)]
@@ -36,6 +35,7 @@ pub enum DriverError {
     ImageSizeNotFound,
     ResourceStateInvalid,
     MutexError,
+    UnexpectedSignature(String),
     Unknown(String),
 }
 
@@ -495,4 +495,72 @@ pub fn get_process_name() -> String {
     }
     
     current_process_thread_name
+}
+
+/// Scan a module by its in memory base address for function offsets. The target param should NOT be null
+/// terminated.
+pub fn scan_usermode_module_for_function_address(
+    base: *const c_void,
+    target: &str,
+) -> Result<*const c_void, DriverError>{
+    // The memory should always be valid.. but.. Cannot use ProbeForRead as we don't
+    // have access to __try :( this is as close as I can get right now I think
+    if unsafe { MmIsAddressValid(base as _) } == FALSE as u8 {
+        println!("[sanctum [-] Address of ntdll not valid.");
+        return Err(DriverError::ResourceStateInvalid);
+    }
+
+    let dos = unsafe { &*(base as *const IMAGE_DOS_HEADER) };
+    if dos.e_magic != 0x5A4D { 
+        return Err(DriverError::UnexpectedSignature("DOS Header".into()));
+    }
+
+    let nth = unsafe { &*(base.add(dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64) };
+    if nth.Signature != 0x00004550 { 
+        return Err(DriverError::UnexpectedSignature("NT Signarue".into()));
+    }
+    if nth.OptionalHeader.Magic != 0x20B { 
+        return Err(DriverError::UnexpectedSignature("NT Magic".into()));
+    }
+
+    unsafe {
+        const IMAGE_DIRECTORY_ENTRY_EXPORT: usize = 0;
+        let dir = &nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if dir.VirtualAddress == 0 || dir.Size < size_of::<IMAGE_EXPORT_DIRECTORY>() as u32 {
+            return Err(DriverError::Unknown("Invalid length".into()));
+        }
+        let exp = &*(rva(base as *const _, dir.VirtualAddress) as *const IMAGE_EXPORT_DIRECTORY);
+
+        let names = rva(base as *const _, exp.AddressOfNames) as *const u32;
+        let ords  = rva(base as *const _, exp.AddressOfNameOrdinals) as *const u16;
+        let funcs = rva(base as *const _, exp.AddressOfFunctions) as *const u32;
+
+        for i in 0..exp.NumberOfNames {
+            let name_ptr = rva(base as *const _, *names.add(i as usize));
+            // compare ascii of the function name
+            let mut p = name_ptr;
+            let mut ok = true;
+            for b in target.as_bytes() {
+                if *p != *b { ok = false; break; }
+                p = p.add(1);
+            }
+            if ok && *p == 0 {
+                let ord = *ords.add(i as usize) as usize;
+                let rva_fn = *funcs.add(ord) as usize;
+                let fn_ptr = (base as *const u8).add(rva_fn) as *const u8;
+                let fn_rva = rva_fn as u32;
+                if fn_rva >= dir.VirtualAddress && fn_rva < dir.VirtualAddress + dir.Size {
+                    continue;
+                }
+                return Ok(fn_ptr as *const c_void);
+            }
+        }
+
+        return Err(DriverError::FunctionNotFoundInModule);
+    }
+}
+
+#[inline(always)]
+unsafe fn rva<'a>(base: *const u8, off: u32) -> *const u8 {
+    unsafe { base.add(off as usize) }
 }

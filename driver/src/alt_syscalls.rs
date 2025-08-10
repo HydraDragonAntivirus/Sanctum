@@ -29,6 +29,7 @@ const SSN_COUNT: usize = 0x500;
 
 pub const SSN_NT_OPEN_PROCESS: u32 = 0x26;
 pub const SSN_NT_ALLOCATE_VIRTUAL_MEMORY: u32 = 0x18;
+pub const SSN_NT_CREATE_THREAD_EX: u32 = 0x00c9;
 pub const SSN_NT_WRITE_VM: u32 = 0x003a;
 
 const NT_OPEN_FILE: u32 = 0x0033;
@@ -452,7 +453,8 @@ pub unsafe extern "system" fn syscall_handler(
     match ssn {
         SSN_NT_OPEN_PROCESS 
             | SSN_NT_ALLOCATE_VIRTUAL_MEMORY
-            | SSN_NT_WRITE_VM => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
+            | SSN_NT_WRITE_VM 
+            | SSN_NT_CREATE_THREAD_EX => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
         // 0x4e => {
         //     println!(
         //         "[create thread] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",

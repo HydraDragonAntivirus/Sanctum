@@ -14,7 +14,7 @@
 //!   Ghost Hunting telemetry
 
 use core::{
-    ffi::c_void, mem::replace, ptr::null_mut, time::Duration
+    arch::asm, ffi::c_void, mem::replace, ptr::null_mut, time::Duration
 };
 
 use alloc::{
@@ -34,14 +34,13 @@ use wdk_mutex::{
 };
 use wdk_sys::{
     ntddk::{
-        IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise,
-        ObOpenObjectByPointer, ObReferenceObjectByHandle, PsCreateSystemThread, PsGetProcessId,
-    }, PsProcessType, HANDLE, LARGE_INTEGER, LIST_ENTRY, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, _EPROCESS, _LARGE_INTEGER, _MODE::KernelMode
+        IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise, MmIsAddressValid, ObOpenObjectByPointer, ObReferenceObjectByHandle, PsCreateSystemThread, PsGetCurrentThreadTeb, PsGetProcessId
+    }, PsProcessType, FALSE, HANDLE, LARGE_INTEGER, LIST_ENTRY, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, _EPROCESS, _LARGE_INTEGER, _MODE::KernelMode, _PEB
 };
 
 use crate::{
-    ffi::NtQueryInformationProcess,
-    utils::{DriverError, eprocess_to_process_name},
+    ffi::{NtQueryInformationProcess, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS64},
+    utils::{eprocess_to_process_name, scan_usermode_module_for_function_address, DriverError},
 };
 
 /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
@@ -60,11 +59,70 @@ pub struct Process {
     pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
     targeted_by_apis: Vec<ProcessTargetedApis>,
     marked_for_deletion: bool,
+    // Note: It is possible atm for any processes started before the EDR was switched on that
+    // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
+    // a problem.
+    // todo fix
+    loaded_modules: Option<LoadedModules>,
+}
+
+/// A BTreeMap of loaded modules in the process, with:
+/// 
+/// - `key`: Module name
+/// `value`: [`LoadedModule`]
+#[derive(Debug)]
+pub struct LoadedModules {
+    inner: BTreeMap<String, LoadedModule>,
+}
+
+#[derive(Debug)]
+pub enum SensitiveAPI {
+    LdrLoadDLL,
+    LoadLibraryA,
+    LoadLibraryW,
+}
+
+/// A representation of a module loaded into a process.
+#[derive(Debug)]
+pub struct LoadedModule {
+    image_base: *const c_void,
+    image_sz: usize,
+    ntdll_addresses: Option<NtdllAddresses>,
+    kernel32_addresses: Option<Kernel32Addresses>,
+}
+
+impl LoadedModule {
+    pub fn new(
+        image_base: *const c_void,
+        image_sz: usize,
+        ntdll_addresses: Option<NtdllAddresses>,
+        kernel32_addresses: Option<Kernel32Addresses>,
+    ) -> Self {
+        Self {
+            image_base,
+            image_sz,
+            ntdll_addresses,
+            kernel32_addresses,
+        }
+    }
+}
+
+/// Addresses within NTDLL that we care about detecting access to.
+#[derive(Debug)]
+pub struct NtdllAddresses {
+    pub LdrLoadDLL: *const c_void,
+}
+
+/// Addresses within NTDLL that we care about detecting access to.
+#[derive(Debug)]
+pub struct Kernel32Addresses {
+    pub LoadLibraryW: *const c_void,
+    pub LoadLibraryA: *const c_void,
 }
 
 // todo needs implementing
 #[derive(Debug, Default)]
-pub struct ProcessTargetedApis {}
+pub struct ProcessTargetedApis;
 
 /// A `GhostHuntingTimer` is the timer metadata associated with the Ghost Hunting technique on my blog:
 /// https://fluxsec.red/edr-syscall-hooking
@@ -148,9 +206,76 @@ impl ProcessMonitor {
             ghost_hunting_timers: Vec::new(),
             targeted_by_apis: Vec::new(),
             marked_for_deletion: false,
+            // Setting this to None should be ok now as the module data should come in once the modules
+            // load into the process.
+            loaded_modules: None,
         });
 
         Ok(())
+    }
+
+    pub fn add_loaded_module(
+        mut lm: LoadedModule,
+        image_name: &String,
+        pid: u32,
+    ) {
+
+        // Lookup any relevant addresses in NTDLL and Kernel32.dll that we want to look for at runtime
+        // with the EDR whilst spending time on a kernel thread. If we make this lookup once per image, it 
+        // should be in the long run, less expensive.
+        get_monitored_dll_address_fn_addrs(&mut lm, image_name);
+
+        let mut process_lock = ProcessMonitor::get_mtx_inner();
+
+        let process = match process_lock.get_mut(&pid) {
+            Some(process) => process,
+            None => {
+                println!("[sanctum] [-] PID {pid} not found in active processes when trying to add image load info.");
+                return;
+            },
+        };
+
+        if let Some(process_loaded_mods) = process.loaded_modules.as_mut() {
+            let _ = process_loaded_mods.inner.insert(image_name.clone(), lm);
+        } else {
+            let mut b = BTreeMap::new();
+            b.insert(image_name.clone(), lm);
+            process.loaded_modules = Some(LoadedModules { inner: b });
+        }
+    }
+
+    pub fn fn_pointer_to_sensitive_address(pid: u32, requested_addr: *const c_void) -> Option<SensitiveAPI> {
+        let process_lock = ProcessMonitor::get_mtx_inner();
+
+        if let Some(process ) = process_lock.get(&pid) {
+            match &process.loaded_modules {
+                Some(lm) => {
+                    for (_, module_info) in &lm.inner {
+                         if let Some(info) = &module_info.kernel32_addresses {
+                            if info.LoadLibraryA == requested_addr {
+                                return Some(SensitiveAPI::LoadLibraryA);
+                            }
+                            if info.LoadLibraryW == requested_addr {
+                                return Some(SensitiveAPI::LoadLibraryW);
+                            }
+                         } else if let Some(info) = &module_info.ntdll_addresses {
+                            if info.LdrLoadDLL == requested_addr {
+                                return Some(SensitiveAPI::LdrLoadDLL);
+                            }
+                         }
+                    }
+                },
+                None => {
+                    println!("[sanctum] [-] process.loaded_modules was none.");
+                    println!("{process:#?}");
+                    return None
+                },
+            };
+        }
+
+        println!("[sanctum] [-] Could not lock process monitor for fn_pointer_to_sensitive_address");
+
+        None
     }
 
     // todo need to remove processes from the monitor once they are terminated
@@ -567,5 +692,50 @@ fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Pr
         ghost_hunting_timers: Vec::new(),
         targeted_by_apis: Vec::new(),
         marked_for_deletion: false,
+        // todo - do we need to grab these?
+        loaded_modules: None,
     })
+}
+
+/// Lookup the addresses of functions we wish to monitor abuse against, populating the [`LoadedModule`]
+/// struct mutably.
+/// 
+/// `image_name` is the name of the image being loaded.
+fn get_monitored_dll_address_fn_addrs(lm: &mut LoadedModule, image_name: &String) {
+
+    if image_name.to_lowercase().contains(r"\windows\system32\ntdll.dll") {
+        let ldr_ld_dll = scan_usermode_module_for_function_address(
+            lm.image_base,
+            "LdrLoadDLL"
+        );
+
+        if ldr_ld_dll.is_ok() {
+            lm.ntdll_addresses = Some(
+                NtdllAddresses {
+                    LdrLoadDLL: ldr_ld_dll.unwrap(),
+                }
+            )
+        }
+    }
+
+    if image_name.to_lowercase().contains(r"\windows\system32\kernel32.dll") {
+        let lla = scan_usermode_module_for_function_address(
+            lm.image_base,
+            "LoadLibraryA"
+        );
+        let llw = scan_usermode_module_for_function_address(
+            lm.image_base,
+            "LoadLibraryW"
+        );
+
+        if lla.is_ok() && llw.is_ok() {
+            lm.kernel32_addresses = Some(
+                Kernel32Addresses {
+                    LoadLibraryW: llw.unwrap(),
+                    LoadLibraryA: lla.unwrap(),
+                }
+            )
+        }
+    }
+
 }

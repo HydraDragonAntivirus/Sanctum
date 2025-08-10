@@ -27,8 +27,7 @@ use wdk_sys::{
 };
 
 use crate::{
-    DRIVER_MESSAGES, REGISTRATION_HANDLE, core::process_monitor::ProcessMonitor,
-    device_comms::ImageLoadQueueForInjector, utils::unicode_to_string,
+    core::process_monitor::{LoadedModule, ProcessMonitor}, device_comms::ImageLoadQueueForInjector, utils::unicode_to_string, DRIVER_MESSAGES, REGISTRATION_HANDLE
 };
 
 /// Callback function for a new process being created on the system.
@@ -287,9 +286,23 @@ extern "C" fn image_load_callback(
     let name_slice = slice_from_raw_parts(image_name.Buffer, (image_name.Length / 2) as usize);
     let name = String::from_utf16_lossy(unsafe { &*name_slice }).to_lowercase();
 
-    // For now only concern ourselves with image loads where its an exe, except in the event its the sanctum EDR DLL -
-    // see below comments for why.
+    // In the event it is a DLL load, we want to grab & track its mappings
     if name.contains(".dll") && !name.contains("sanctum.dll") {
+        // todo hash check on the sanctum DLL to make sure an adversary isn't calling their malicious DLL `sanctum.dll`
+        // which would interfere with what we are doing in this segment.
+        
+        // todo is it re-loading NTDLL when NTDLL already exists in the process? Bad, we want to stop this and report
+        // on it.
+
+        let lm = LoadedModule::new(
+            image_info.ImageBase as _, 
+            image_info.ImageSize as _, 
+            None,
+            None
+        );
+
+        ProcessMonitor::add_loaded_module(lm, &name, pid as u32);
+
         return;
     }
 
