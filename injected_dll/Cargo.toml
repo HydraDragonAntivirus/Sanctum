@@ -20,6 +20,8 @@ windows = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
 ] }
 shared_no_std = { path = "../shared_no_std" }
 shared_std = { path = "../shared_std" }

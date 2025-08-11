@@ -128,6 +128,8 @@ impl KernelSyscallIntercept {
         let dest_pid = handle_to_pid(ktrap_frame.R9 as *mut c_void);
 
         // For now, we are not interested in self thread creates
+        // This also presents a GH problem of thread syscalls BEFORE the injection of our DLL 
+        // for Ghost Hunting at least..
         if current_pid == dest_pid {
             return None;
         }
@@ -162,11 +164,9 @@ impl KernelSyscallIntercept {
             dest_pid, 
             start_address
         ) {
+            // todo logging? containment?
             println!("**** WARNING: Sensitive API detected in start thread!! {resolved:?}");
         }
-
-
-        println!("Start: {start_address:p}, arg: {argument:p}");
 
         let data = Syscall::from_kernel(
             current_pid, 
@@ -175,8 +175,6 @@ impl KernelSyscallIntercept {
             start_routine: start_address as usize,
             argument: argument as usize,
         }));
-
-        println!("Data from NtCreateThreadEx: {data:?}");
 
         Some(data)
     }

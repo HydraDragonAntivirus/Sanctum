@@ -1,5 +1,3 @@
-#![feature(naked_functions)]
-
 use integrity::start_ntdll_integrity_monitor;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -22,6 +20,8 @@ use windows::{
     },
     core::PCSTR,
 };
+
+use crate::stubs::{nt_create_thread_ex_intercept, nt_open_process, nt_write_virtual_memory, virtual_alloc_ex};
 
 mod integrity;
 mod ipc;
@@ -94,13 +94,6 @@ struct Addresses {
 impl<'a> StubAddresses<'a> {
     /// Retrieve the virtual addresses of all callback functions for the DLL.
     fn new() -> Self {
-        // Get a handle to ourself
-        let h_sanc_dll = unsafe { GetModuleHandleA(s!("sanctum.dll")) };
-        let h_sanc_dll = match h_sanc_dll {
-            Ok(h) => h,
-            Err(_) => todo!(),
-        };
-
         // Get a handle to ntdll
         let h_ntdll = unsafe { GetModuleHandleA(s!("Ntdll.dll")) };
         let h_ntdll = match h_ntdll {
@@ -108,64 +101,6 @@ impl<'a> StubAddresses<'a> {
             Err(_) => todo!(),
         };
 
-        //
-        // Get function pointers to our callback symbols
-        //
-
-        // OpenProcess
-        let open_process_fn_addr = unsafe { GetProcAddress(h_sanc_dll, s!("open_process")) };
-        let open_process_fn_addr = match open_process_fn_addr {
-            None => {
-                unsafe {
-                    MessageBoxA(
-                        None,
-                        s!("Could not get fn addr\0"),
-                        s!("Could not get fn addr\0"),
-                        MB_OK,
-                    )
-                };
-                panic!("Oh no :("); // todo dont panic a process?
-            }
-            Some(address) => address as *const (),
-        } as usize;
-
-        // VirtualAllocEx
-        let virtual_alloc_stub = unsafe { GetProcAddress(h_sanc_dll, s!("virtual_alloc_ex")) };
-        let virtual_alloc_stub = match virtual_alloc_stub {
-            None => {
-                unsafe {
-                    MessageBoxA(
-                        None,
-                        s!("Could not get fn addr\0"),
-                        s!("Could not get fn addr\0"),
-                        MB_OK,
-                    )
-                };
-                panic!("Oh no :("); // todo dont panic a process?
-            }
-            Some(address) => address as *const (),
-        } as usize;
-
-        // WriteProcessMemory
-        let nt_write_virtual_memory =
-            unsafe { GetProcAddress(h_sanc_dll, s!("nt_write_virtual_memory")) };
-        let nt_write_virtual_memory = match nt_write_virtual_memory {
-            None => {
-                unsafe {
-                    MessageBoxA(
-                        None,
-                        s!("Could not get fn addr nt_write_virtual_memory"),
-                        s!("Could not get fn addr nt_write_virtual_memory"),
-                        MB_OK,
-                    )
-                };
-                panic!("Oh no :("); // todo dont panic a process?
-            }
-            Some(address) => address as *const (),
-        } as usize;
-
-        // NtProtectVirtualMemory
-        let nt_protect_virtual_memory = nt_protect_virtual_memory as usize;
         let x = format!("Injecting Sanctum DLL\0");
         unsafe {
             MessageBoxA(
@@ -175,6 +110,7 @@ impl<'a> StubAddresses<'a> {
                 MB_OK,
             )
         };
+
 
         //
         // Get function pointers to the functions we wish to hook
@@ -189,6 +125,23 @@ impl<'a> StubAddresses<'a> {
                         None,
                         s!("Could not get fn addr"),
                         s!("Could not get fn addr"),
+                        MB_OK,
+                    )
+                };
+                panic!("Oh no :("); // todo dont panic a process?
+            }
+            Some(address) => address as *const (),
+        } as usize;
+
+        // NtCreateThreadEx
+        let ntctx = unsafe { GetProcAddress(h_ntdll, s!("NtCreateThreadEx")) };
+        let ntctx = match ntctx {
+            None => {
+                unsafe {
+                    MessageBoxA(
+                        None,
+                        s!("Could not get fn addr ntctx"),
+                        s!("Could not get fn addr ntctx"),
                         MB_OK,
                     )
                 };
@@ -255,23 +208,30 @@ impl<'a> StubAddresses<'a> {
         hm.insert(
             "NtOpenProcess",
             Addresses {
-                edr: open_process_fn_addr,
+                edr: nt_open_process as usize,
                 ntdll: zwop,
             },
         );
         hm.insert(
             "NtAllocateVirtualMemory",
             Addresses {
-                edr: virtual_alloc_stub,
+                edr: virtual_alloc_ex as usize,
                 ntdll: zwavm,
             },
         );
         hm.insert(
             "NtWriteVirtualMemory",
             Addresses {
-                edr: nt_write_virtual_memory,
+                edr: nt_write_virtual_memory as usize,
                 ntdll: zwvm,
             },
+        );
+        hm.insert(
+            "NtCreateThreadEx", 
+            Addresses { 
+                edr: nt_create_thread_ex_intercept as usize,
+                ntdll: ntctx,
+            }
         );
 
         // Prefix this with ZZZ to make sure it is to be the very last item. We need to make sure this is processed
@@ -279,7 +239,7 @@ impl<'a> StubAddresses<'a> {
         hm.insert(
             "ZZZNtProtectVirtualMemory",
             Addresses {
-                edr: nt_protect_virtual_memory,
+                edr: nt_protect_virtual_memory as usize,
                 ntdll: ntpvm,
             },
         );
@@ -414,11 +374,12 @@ fn patch_ntdll(addresses: &StubAddresses) {
 pub static SYSCALL_NUMBER: LazyLock<BTreeMap<&'static str, u32>> = LazyLock::new(|| {
     let mut syscall_num_repo = BTreeMap::new();
 
-    static NT_FUNC_NAMES: [&str; 4] = [
+    static NT_FUNC_NAMES: [&str; 5] = [
         "ZwOpenProcess\0",
         "ZwAllocateVirtualMemory\0",
         "NtWriteVirtualMemory\0",
         "NtProtectVirtualMemory\0",
+        "NtCreateThreadEx\0",
     ];
 
     if let Ok(h_ntdll) = unsafe { GetModuleHandleA(s!("Ntdll.dll")) } {

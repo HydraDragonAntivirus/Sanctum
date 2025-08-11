@@ -638,7 +638,7 @@ pub fn ioctl_dll_hook_syscall(
 
     // SAFETY: Pointer validity checked above
     let input_data = unsafe { from_raw_parts(input_data, ioctl_buffer.len as usize) };
-    let input_data: Syscall = match serde_json::from_slice(&input_data) {
+    let syscall_data: Syscall = match serde_json::from_slice(&input_data) {
         Ok(d) => d,
         Err(e) => {
             println!("Failed to parse JSON from user: {:?}", e);
@@ -646,7 +646,7 @@ pub fn ioctl_dll_hook_syscall(
         }
     };
 
-    ProcessMonitor::ghost_hunt_add_event(input_data);
+    ProcessMonitor::ghost_hunt_add_event(syscall_data);
 
     Ok(())
 }

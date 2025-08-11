@@ -1,11 +1,10 @@
 //! Stubs that act as callback functions from syscalls.
 
-use crate::{SYSCALL_NUMBER, integrity::get_base_and_sz_ntdll, ipc::send_ipc_to_engine};
+use crate::{integrity::get_base_and_sz_ntdll, ipc::{send_ipc_to_engine}, SYSCALL_NUMBER};
 use shared_no_std::ghost_hunting::{
-    DLLMessage, NtAllocateVirtualMemoryData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData,
-    Syscall, SyscallEventSource,
+    DLLMessage, NtAllocateVirtualMemoryData, NtCreateThreadExData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall, SyscallEventSource
 };
-use std::{arch::asm, ffi::c_void};
+use std::{arch::{asm, naked_asm}, ffi::c_void};
 use windows::Win32::{
     Foundation::HANDLE,
     System::{
@@ -20,8 +19,7 @@ use windows::Win32::{
 
 /// Injected DLL routine for examining the arguments passed to ZwOpenProcess and NtOpenProcess from
 /// any process this DLL is injected into.
-#[unsafe(no_mangle)]
-unsafe extern "system" fn open_process(
+pub fn nt_open_process(
     process_handle: HANDLE,
     desired_access: u32,
     object_attrs: *mut c_void,
@@ -69,8 +67,7 @@ unsafe extern "system" fn open_process(
 }
 
 /// Syscall hook for ZwAllocateVirtualMemory
-#[unsafe(no_mangle)]
-unsafe extern "system" fn virtual_alloc_ex(
+pub fn virtual_alloc_ex(
     process_handle: HANDLE,
     base_address: *mut c_void,
     zero_bits: usize,
@@ -145,8 +142,7 @@ unsafe extern "system" fn virtual_alloc_ex(
     }
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "system" fn nt_write_virtual_memory(
+pub fn nt_write_virtual_memory(
     handle: HANDLE,
     base_address: *mut c_void,
     buffer: *mut c_void,
@@ -267,4 +263,81 @@ pub fn nt_protect_virtual_memory(
             options(nostack),
         );
     }
+}
+
+pub fn nt_create_thread_ex_intercept(
+    thread_handle: *const c_void,
+    desired_access: u32,
+    oa: *const c_void,
+    process_handle: HANDLE,
+    start_routine: *const c_void,
+    arg: *const c_void,
+    create_flags: u32,
+    zero_bits: usize,
+    stack_sz: usize,
+    max_stack_sz: usize,
+    attribute_list: *const c_void,
+) {
+    // All monitoring of this hook is taking place in the kernel, so we just want to send the IPC
+    // so we can ghost hunt. We could implement some logic here instead of the kernel if desired.. tbh
+    // I would only do that at this point now we can use Alt Syscalls if we needed to for performance reasons.
+
+    let pid = unsafe { GetCurrentProcessId() };
+    let remote_pid = unsafe { GetProcessId(process_handle) };
+
+    if pid != remote_pid {
+        let data = Syscall::from_sanctum_dll(
+            pid,
+            NtFunction::NtCreateThreadEx(NtCreateThreadExData {
+                target_pid: remote_pid,
+                start_routine: start_routine as usize,
+                argument: arg as usize,
+            })
+        ); 
+
+        send_ipc_to_engine(DLLMessage::SyscallWrapper(data));
+    }
+    
+    // proceed with the syscall
+    let ssn = *SYSCALL_NUMBER
+    .get("NtCreateThreadEx")
+    .expect("failed to find function hook for NtCreateThreadEx");
+
+    nt_create_thread_ex_naked(
+        thread_handle,
+        desired_access,
+        oa,
+        process_handle.0,
+        start_routine,
+        arg,
+        create_flags,
+        zero_bits,
+        stack_sz,
+        max_stack_sz,
+        attribute_list,
+        ssn,
+    );
+}
+
+#[unsafe(naked)]
+extern "system" fn nt_create_thread_ex_naked(
+    thread_handle: *const c_void,
+    desired_access: u32,
+    oa: *const c_void,
+    process_handle: *const c_void,
+    start_routine: *const c_void,
+    arg: *const c_void,
+    create_flags: u32,
+    zero_bits: usize,
+    stack_sz: usize,
+    max_stack_sz: usize,
+    attribute_list: *const c_void,
+    ssn: u32,
+) {
+    naked_asm!(
+        "mov r10, rcx",
+        "mov eax, [rsp+0x60]",
+        "syscall",
+        "ret",
+    )
 }
