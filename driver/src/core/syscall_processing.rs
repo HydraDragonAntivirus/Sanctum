@@ -200,9 +200,12 @@ impl KernelSyscallIntercept {
                 ),
             ) {
                 if !pending {
-                    println!("Inner 1?!");
-                    if ProcessMonitor::processes_has_disallowed_monitored_syscalls(current_pid) {
-                        println!("Inner 2?!");
+                    // Given the sensitivity of this API for process injection; we can check its
+                    // state before allowing it to complete, in essence, blocking the creation of the 
+                    // remove thread if we are in blocking mode and have detected bad behaviour.
+                    // This MAY need some performance measurements and further investigation in the 
+                    // future, but works as a POC for now
+                    if ProcessMonitor::is_blocking_syscalls(current_pid) {
                         return (None, AllowSyscall::No);
                     } else {
                         return (None, AllowSyscall::Yes);

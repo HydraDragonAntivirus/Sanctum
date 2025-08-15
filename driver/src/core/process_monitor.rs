@@ -230,7 +230,7 @@ impl ProcessMonitor {
         Grt::register_fast_mutex("ProcessMonitor", processes)
     }
 
-    pub fn processes_has_disallowed_monitored_syscalls(pid: u32) -> bool {
+    pub fn is_blocking_syscalls(pid: u32) -> bool {
         let process_list = Self::get_mtx_inner();
         if let Some(process) = process_list.get(&pid) {
             return process.monitored_syscalls_disallowed;
