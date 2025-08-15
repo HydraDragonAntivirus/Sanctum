@@ -1,3 +1,5 @@
+use core::arch::x86_64::_MM_HINT_NTA;
+
 use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 
@@ -75,22 +77,24 @@ pub enum NtFunction {
     NtCreateThreadEx(NtCreateThreadExData),
 }
 
-#[repr(u64)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NtFunctionMask {
-    NtOpenProcess = 0x1,
-    NtWriteVirtualMemory = 0x2,
-    NtAllocateVirtualMemory = 0x4,
-    NtCreateThreadEx = 0x8,
-}
+impl NtFunction {
+    pub const M_NONE: u64               = 0x0;
+    pub const M_NT_OPEN_PROCESS: u64    = 1 << 0;
+    pub const M_NT_WRITE_VM: u64        = 1 << 1;
+    pub const M_NT_ALLOC_VM: u64           = 1 << 2;
+    pub const M_CREATE_THREAD_EX: u64   = 1 << 3;
 
-impl NtFunctionMask {
-    pub const ALL_MASKS: [NtFunctionMask; 4] = [
-        NtFunctionMask::NtOpenProcess,
-        NtFunctionMask::NtWriteVirtualMemory,
-        NtFunctionMask::NtAllocateVirtualMemory,
-        NtFunctionMask::NtCreateThreadEx,
-    ];
+    pub fn as_mask(&self) -> u64 {
+        let m = match self {
+            NtFunction::None => Self::M_NONE,
+            NtFunction::NtOpenProcess(_) => Self::M_NT_OPEN_PROCESS,
+            NtFunction::NtWriteVirtualMemory(_) => Self::M_NT_WRITE_VM,
+            NtFunction::NtAllocateVirtualMemory(_) => Self::M_NT_ALLOC_VM,
+            NtFunction::NtCreateThreadEx(_) => Self::M_CREATE_THREAD_EX,
+        };
+
+        m
+    }
 }
 
 /// todo docs

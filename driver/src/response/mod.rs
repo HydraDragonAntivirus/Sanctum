@@ -1,10 +1,13 @@
 use alloc::string::String;
 use wdk::println;
 
-use crate::{core::process_monitor::ProcessMonitor, response::containment::{Containment, DriverMode, DRIVER_MODE}};
+use crate::{
+    core::process_monitor::ProcessMonitor,
+    response::containment::{Containment, DRIVER_MODE, DriverMode},
+};
 
-mod reporting;
 mod containment;
+mod reporting;
 
 pub trait ReportInfo {
     fn explain(&self) -> String;
@@ -18,10 +21,7 @@ pub enum ReportEventType {
 
 /// Reports an event to the telemetry server, containing the process if the EDR is configured in
 /// Block mode.
-pub fn contain_and_report<T: ReportInfo>(
-    pid: u32,
-    details: &T,
-) {
+pub fn contain_and_report<T: ReportInfo>(pid: u32, details: &T) {
     if DRIVER_MODE == DriverMode::Blocking {
         println!("Disallowing syscalls on process..");
         ProcessMonitor::disallow_syscalls(pid);

@@ -27,7 +27,10 @@ use wdk_sys::{
 };
 
 use crate::{
-    core::process_monitor::{LoadedModule, ProcessMonitor}, device_comms::ImageLoadQueueForInjector, utils::unicode_to_string, DRIVER_MESSAGES, REGISTRATION_HANDLE
+    DRIVER_MESSAGES, REGISTRATION_HANDLE,
+    core::process_monitor::{LoadedModule, ProcessMonitor},
+    device_comms::ImageLoadQueueForInjector,
+    utils::unicode_to_string,
 };
 
 /// Callback function for a new process being created on the system.
@@ -48,9 +51,9 @@ pub unsafe extern "C" fn process_create_callback(
         // process started
         //
 
-        let image_name = unicode_to_string(unsafe {(*create_info).ImageFileName});
-        let command_line = unicode_to_string(unsafe {(*create_info).CommandLine});
-        let parent_pid = unsafe { (*create_info).ParentProcessId as u32} ;
+        let image_name = unicode_to_string(unsafe { (*create_info).ImageFileName });
+        let command_line = unicode_to_string(unsafe { (*create_info).CommandLine });
+        let parent_pid = unsafe { (*create_info).ParentProcessId as u32 };
         let pid = pid as u32;
 
         if image_name.is_err() || command_line.is_err() {
@@ -98,7 +101,6 @@ pub unsafe extern "C" fn process_create_callback(
         if let Err(e) = ProcessMonitor::onboard_new_process(&process_started) {
             println!("[sanctum] [-] Error onboarding new process to PM. {:?}", e)
         };
-
     } else {
         //
         // process terminated
@@ -258,7 +260,6 @@ extern "C" fn image_load_callback(
     pid: HANDLE,
     image_info: *mut _IMAGE_INFO,
 ) {
-
     // todo can i use this callback in an attempt to detect DLL SOH?? :)
 
     // I guess these should never be null
@@ -290,14 +291,11 @@ extern "C" fn image_load_callback(
     if name.contains(".dll") && !name.contains("sanctum.dll") {
         // todo hash check on the sanctum DLL to make sure an adversary isn't calling their malicious DLL `sanctum.dll`
         // which would interfere with what we are doing in this segment.
-        
+
         // todo is it re-loading NTDLL when NTDLL already exists in the process? Bad, we want to stop this and report
         // on it.
 
-        let lm = LoadedModule::new(
-            image_info.ImageBase as _, 
-            image_info.ImageSize as _, 
-        );
+        let lm = LoadedModule::new(image_info.ImageBase as _, image_info.ImageSize as _);
 
         ProcessMonitor::add_loaded_module(lm, &name, pid as u32);
 
@@ -335,8 +333,7 @@ extern "C" fn image_load_callback(
     }
 
     // For now, only inject into these processes whilst we test
-    if !name.contains("malware.exe")
-    {
+    if !name.contains("malware.exe") {
         return;
     }
 

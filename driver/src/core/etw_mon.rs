@@ -18,6 +18,8 @@ use wdk_sys::{
     },
 };
 
+use crate::utils::duration_to_large_int;
+
 /// Entrypoint for monitoring kernel ETW structures to detect rootkits or other ETW manipulation
 pub fn monitor_kernel_etw() {
     // Call the functions
@@ -310,10 +312,7 @@ pub fn get_etw_dispatch_table<'a>() -> Result<BTreeMap<&'a str, *const c_void>, 
 /// - ETW Kernel Dispatch Table
 /// - Disabling global active system loggers
 unsafe extern "C" fn thread_run_monitor_etw(_: *mut c_void) {
-    let delay_as_duration = Duration::from_millis(150);
-    let mut thread_sleep_time = LARGE_INTEGER {
-        QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
-    };
+    let mut thread_sleep_time = duration_to_large_int(Duration::from_millis(150));
 
     loop {
         let _ =
