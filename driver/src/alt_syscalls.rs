@@ -17,8 +17,8 @@ use wdk_sys::{
 };
 
 use crate::{
-    core::syscall_processing::
-        KernelSyscallIntercept
+    core::syscall_processing::{AllowSyscall, 
+        KernelSyscallIntercept}
     , ffi::{ZwGetNextProcess, ZwGetNextThread}, utils::{
         get_module_base_and_sz, get_process_name, scan_module_for_byte_pattern, thread_to_process_name, DriverError
     }
@@ -450,27 +450,15 @@ pub unsafe extern "system" fn syscall_handler(
         },
     };
 
-    match ssn {
+    let allowed = match ssn {
         SSN_NT_OPEN_PROCESS 
             | SSN_NT_ALLOCATE_VIRTUAL_MEMORY
             | SSN_NT_WRITE_VM 
             | SSN_NT_CREATE_THREAD_EX => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
-        // 0x4e => {
-        //     println!(
-        //         "[create thread] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
-        //         ssn, rcx, rsp
-        //     );
-        // }
-        // 0xc9 => {
-        //     println!(
-        //         "[create thread ex] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
-        //         ssn, rcx, rsp
-        //     );
-        // }
-        _ => (),
-    }
+        _ => AllowSyscall::Yes,
+    };
 
-    1
+    allowed as i32
 }
 
 /// Get the address of the non-exported kernel symbol: `PspServiceDescriptorGroupTable`

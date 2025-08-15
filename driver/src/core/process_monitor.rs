@@ -18,12 +18,13 @@ use core::{
 };
 
 use alloc::{
-    boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, vec::Vec
+    borrow::Cow, boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, vec::Vec
 };
 use shared_no_std::{
     driver_ipc::ProcessStarted,
-    ghost_hunting::{NtFunction, Syscall, SyscallEventSource}, ioctl::BaseAddressesOfMonitoredDlls,
+    ghost_hunting::{NtFunction, NtFunctionMask, Syscall, SyscallEventSource}, ioctl::BaseAddressesOfMonitoredDlls,
 };
+use strum::IntoEnumIterator;
 use wdk::{nt_success, println};
 use wdk_mutex::{
     errors::GrtError,
@@ -37,7 +38,7 @@ use wdk_sys::{
 };
 
 use crate::{
-    device_comms::IoctlBuffer, ffi::{InitializeObjectAttributes, NtQueryInformationProcess}, utils::{eprocess_to_process_name, scan_usermode_module_for_function_address, DriverError}
+    device_comms::IoctlBuffer, ffi::{InitializeObjectAttributes, NtQueryInformationProcess}, response::{contain_and_report, ReportEventType, ReportInfo}, utils::{eprocess_to_process_name, scan_usermode_module_for_function_address, DriverError}
 };
 
 pub static MONITORED_FN_PTRS: AtomicPtr<MonitoredApis> = AtomicPtr::new(null_mut());
@@ -51,7 +52,7 @@ pub struct MonitoredApis {
 
 /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
 /// onto it, can be tracked and monitored.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Process {
     pub pid: u32,
     /// Parent pid
@@ -65,6 +66,10 @@ pub struct Process {
     pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
     targeted_by_apis: Vec<ProcessTargetedApis>,
     marked_for_deletion: bool,
+    /// Whether the process is marked to be for containment. Setting this to `true` will allow blocked syscalls to
+    /// 'complete' but without actually dispatching the syscall. This marker should not be added when the EDR is in 
+    /// report only mode.
+    monitored_syscalls_disallowed: bool,
     // Note: It is possible atm for any processes started before the EDR was switched on that
     // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
     // a problem.
@@ -76,7 +81,7 @@ pub struct Process {
 /// 
 /// - `key`: Module name
 /// `value`: [`LoadedModule`]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LoadedModules {
     inner: BTreeMap<String, LoadedModule>,
 }
@@ -89,7 +94,7 @@ pub enum SensitiveAPI {
 }
 
 /// A representation of a module loaded into a process.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct LoadedModule {
     image_base: *const c_void,
     image_sz: usize,
@@ -121,7 +126,7 @@ pub struct Kernel32Addresses {
 }
 
 // todo needs implementing
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProcessTargetedApis;
 
 /// A `GhostHuntingTimer` is the timer metadata associated with the Ghost Hunting technique on my blog:
@@ -135,6 +140,22 @@ pub struct GhostHuntingTimer {
     pub event_type: NtFunction,
     /// todo update docs
     pub origin: SyscallEventSource,
+}
+
+impl ReportInfo for GhostHuntingTimer {
+    fn explain(&self) -> String {
+        format!(
+            "The Ghost Hunting system detected abuse within a process strongly indicating that direct / indirect syscalls \
+            are being used. This technique is common for malware which is trying to evade EDR by bypassing mechanisms that the \
+            EDR can provide in its DLL. The process should be analysed for indications of malware. The system call and its \
+            respective data responsible for this event is: {:?}.",
+            self.event_type,
+        )
+    }
+    
+    fn event_type() -> ReportEventType {
+        ReportEventType::GhostHunt
+    }
 }
 
 impl core::fmt::Debug for GhostHuntingTimer {
@@ -188,6 +209,17 @@ impl ProcessMonitor {
         Grt::register_fast_mutex("ProcessMonitor", processes)
     }
 
+    pub fn processes_has_disallowed_monitored_syscalls(pid: u32) -> bool {        
+        let process_list = Self::get_mtx_inner();
+        if let Some(process) = process_list.get(&pid) {
+            return process.monitored_syscalls_disallowed;
+        }
+
+        // todo handle the error case where we didnt get a valid mapped process, maybe evidence of
+        // rootkit unhooking processes?
+        false
+    }
+
     pub fn onboard_new_process(process: &ProcessStarted) -> Result<(), ProcessErrors> {
         let mut process_monitor_lock = ProcessMonitor::get_mtx_inner();
 
@@ -209,13 +241,14 @@ impl ProcessMonitor {
             // Setting this to None should be ok now as the module data should come in once the modules
             // load into the process.
             loaded_modules: None,
+            monitored_syscalls_disallowed: false,
         });
 
         Ok(())
     }
 
     pub fn add_loaded_module(
-        mut lm: LoadedModule,
+        lm: LoadedModule,
         image_name: &String,
         pid: u32,
     ) {
@@ -239,7 +272,7 @@ impl ProcessMonitor {
         }
     }
 
-    pub fn fn_pointer_to_sensitive_address(pid: u32, requested_addr: *const c_void) -> Option<SensitiveAPI> {
+    pub fn fn_pointer_to_sensitive_address(requested_addr: *const c_void) -> Option<SensitiveAPI> {
 
         let monitored_fn_ptrs = MONITORED_FN_PTRS.load(Ordering::SeqCst);
         if monitored_fn_ptrs.is_null() {
@@ -278,7 +311,7 @@ impl ProcessMonitor {
         };
 
         // If it has outstanding, mark for deletion until those are completed
-        if process.has_outstanding_transactions() {
+        if process.has_outstanding_gh_transactions(None) {
             process.marked_for_deletion = true;
             return;
         }
@@ -310,7 +343,7 @@ impl ProcessMonitor {
 
         for (_, process) in process_lock.iter_mut() {
             if process.marked_for_deletion &&
-                !process.has_outstanding_transactions() {
+                !process.has_outstanding_gh_transactions(None) {
                     pids_to_remove.push(process.pid);
             }
         }
@@ -342,20 +375,15 @@ impl ProcessMonitor {
             // We can use the `extract_if` unstable API for `Vec`
             //
             
-            for expired_timer in process.ghost_hunting_timers.extract_if(.., |t| {
+            for timer in process.ghost_hunting_timers.extract_if(.., |t| {
                 let mut current_time = LARGE_INTEGER::default();
                 unsafe { KeQuerySystemTimePrecise(&mut current_time) };
 
                 let time_delta = unsafe { current_time.QuadPart - t.timer_start.QuadPart };
                 time_delta > unsafe { max_time_allowed.QuadPart }
             }) {
-                    // todo risk score
-                    // process.update_process_risk_score(item.weight);
-                    println!(
-                        "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
-                        expired_timer.event_type, process.pid
-                    );
-                    // todo telemetry
+                println!("Pushing bad timer. {:?}", timer);
+                respond_to_gh_timer_expiry(process.pid, &timer);
             }
         }
     }
@@ -381,6 +409,13 @@ impl ProcessMonitor {
             };
 
         process_lock
+    }
+
+    pub fn disallow_syscalls(pid: u32) {
+        let mut ps = Self::get_mtx_inner();
+        if let Some(p) = ps.get_mut(&pid) {
+            p.monitored_syscalls_disallowed = true;
+        }
     }
 
     /// Spawns a system thread to poll Ghost Hunting timers and do other work on behalf of the [`ProcessMonitor`].
@@ -443,6 +478,22 @@ impl ProcessMonitor {
             panic!()
         }
     }
+
+    /// Determines whether the process has outstanding ghost hunting transactions, applied with either a bitflag or not.
+    /// For no mask, `None` should be given, which indicates that the caller only wants to know "are there any outstanding
+    /// Ghost Hunting timers whatsoever?". 
+    /// 
+    /// Should this value be set to `Some`, it should consist of an ORed bitflag indicating which syscalls the caller cares 
+    /// about checking outstanding Ghost Hunt timers for.
+    pub fn process_has_pending_gh_transactions(pid: u32, mask: Option<u64>) -> Result<bool, DriverError> {
+        let mut process_lock = ProcessMonitor::get_mtx_inner();
+
+        if let Some(process) = process_lock.get_mut(&pid) {
+            return Ok(process.has_outstanding_gh_transactions(mask))
+        }
+
+        return Err(DriverError::ProcessNotFound);
+    }
 }
 
 impl Process {
@@ -477,8 +528,24 @@ impl Process {
         self.ghost_hunting_timers.push(new_timer);
     }
 
-    fn has_outstanding_transactions(&self) -> bool {
-        !self.ghost_hunting_timers.is_empty()
+    /// Determines whether the process has outstanding ghost hunting transactions, applied with either a bitflag or not.
+    /// For no flags, `None` should be given, which indicates that the caller only wants to know "are there any outstanding
+    /// Ghost Hunting timers whatsoever?". 
+    /// 
+    /// Should this value be set to `Some`, it should consist of an ORed bitflag indicating which syscalls the caller cares 
+    /// about checking outstanding Ghost Hunt timers for.
+    fn has_outstanding_gh_transactions(&self, flags: Option<u64>) -> bool {
+        if let Some(flags) = flags {
+            for mask in NtFunctionMask::ALL_MASKS.iter() {
+                if flags & *mask as u64 == 1 {
+                    return true;
+                }
+            }
+            // If the mask does not contain our requirement, then we can return true
+            return true;
+        } else {
+            !self.ghost_hunting_timers.is_empty()
+        }
     }
 }
 
@@ -672,6 +739,7 @@ fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Pr
         marked_for_deletion: false,
         // todo - do we need to grab these?
         loaded_modules: None,
+        monitored_syscalls_disallowed: false,
     })
 }
 
@@ -805,4 +873,20 @@ fn extract_monitored_user_fn_ptrs_as_rva(
 
     Some(relative)
 
+}
+
+/// Determines what to do in the case of detecting an expired [`GhostHuntingTimer`], as not all timers are created equal.
+/// There are edge cases around certain timers going off which may not inherently be bad behaviour (depending on edge cases
+/// as they crop up).
+fn respond_to_gh_timer_expiry(pid: u32, timer: &GhostHuntingTimer) {
+    match &timer.event_type {
+        NtFunction::None => (),
+        NtFunction::NtOpenProcess(_) | 
+            NtFunction::NtWriteVirtualMemory(_) |
+            NtFunction::NtAllocateVirtualMemory(_) | 
+            NtFunction::NtCreateThreadEx(_) => contain_and_report(
+            pid,
+            timer,
+        ),
+    }
 }

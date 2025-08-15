@@ -68,6 +68,7 @@ mod core;
 mod device_comms;
 mod ffi;
 mod utils;
+mod response;
 
 use wdk_alloc::WdkAllocator;
 

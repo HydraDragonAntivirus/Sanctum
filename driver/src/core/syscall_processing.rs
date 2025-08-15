@@ -9,7 +9,7 @@ use core::{
 };
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
-use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtCreateThreadExData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall};
+use shared_no_std::ghost_hunting::{NtAllocateVirtualMemoryData, NtCreateThreadExData, NtFunction, NtFunctionMask, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall};
 use wdk::{nt_success, println};
 use wdk_mutex::{
     fast_mutex::FastMutexGuard,
@@ -22,6 +22,13 @@ use wdk_sys::{
 };
 
 use crate::{alt_syscalls::{SSN_NT_ALLOCATE_VIRTUAL_MEMORY, SSN_NT_CREATE_THREAD_EX, SSN_NT_OPEN_PROCESS, SSN_NT_WRITE_VM}, core::process_monitor::ProcessMonitor, utils::{handle_to_pid, DriverError}};
+
+/// Whether to allow the syscall to dispatch by the dispatcher
+#[repr(i32)]
+pub enum AllowSyscall {
+    No = 0x0,
+    Yes = 0x1,
+}
 
 /// Returns a borrowed view over stack argument slots saved in a `_KTRAP_FRAME`.
 /// The slice elements are interpreted as raw pointer-width values (`*const c_void`)
@@ -79,12 +86,6 @@ static SYSCALL_PP_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
-// #[derive(Debug)]
-// pub enum Syscall {
-//     NtOpenProcess(NtOpenProcess),
-//     NtAllocateVirtualMemory(NtAllocateVirtualMemory),
-// }
-
 pub struct KernelSyscallIntercept {
     pub syscall: Syscall,
 }
@@ -95,7 +96,7 @@ impl KernelSyscallIntercept {
     /// which deals with processing of system calls.
     pub fn from_alt_syscall(
         ktrap_frame: KTRAP_FRAME,
-    ) {
+    ) -> AllowSyscall {
 
         //
         // We want to match here on the SSN, and process each SSN as appropriate for 
@@ -103,26 +104,28 @@ impl KernelSyscallIntercept {
         //
         let rax = ktrap_frame.Rax as u32;
 
-        let syscall_data: Option<Syscall> = match rax {
+        let syscall_data: (Option<Syscall>, AllowSyscall) = match rax {
             SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Self::nt_allocate_vm(ktrap_frame),
             SSN_NT_OPEN_PROCESS => Self::nt_open_process(ktrap_frame),
             SSN_NT_WRITE_VM => Self::nt_write_vm(ktrap_frame),
             SSN_NT_CREATE_THREAD_EX => Self::nt_create_thread_ex(ktrap_frame),
             _ => {
                 println!("[-] [sanctum] Unknown SSN received, {:?}", ktrap_frame.Rax as u32);
-                None
+                (None, AllowSyscall::Yes)
             }
         };
 
         // Push the data onto the queue for processing
-        if let Some(syscall_data) = syscall_data {
+        if let Some(syscall_data) = syscall_data.0 {
             SyscallPostProcessor::push(syscall_data);
         }
+
+        syscall_data.1
     }
 
     fn nt_create_thread_ex(
         ktrap_frame: KTRAP_FRAME,
-    ) -> Option<Syscall> {
+    ) -> (Option<Syscall>, AllowSyscall) {
 
         let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
         let dest_pid = handle_to_pid(ktrap_frame.R9 as *mut c_void);
@@ -131,13 +134,24 @@ impl KernelSyscallIntercept {
         // This also presents a GH problem of thread syscalls BEFORE the injection of our DLL 
         // for Ghost Hunting at least..
         if current_pid == dest_pid {
-            return None;
+            return (None, AllowSyscall::Yes);
         }
 
         let stack_args = unsafe { ktrap_get_stack_args(&ktrap_frame, 2) };
         // SAFETY: Reading two arguments, within limits from the call to ktrap_get_stack_args
         let start_address = stack_args[0];
         let argument = stack_args[1];
+
+        // As to not unnecessarily delay the signal matching for Ghost Hunting, send the signal manually from this point
+        // as there is the possibility we enter a short spin below which could accidentally hit the ghost hunting monitors
+        // as a false positive.
+        SyscallPostProcessor::push(Syscall::from_kernel(
+            current_pid, 
+            NtFunction::NtCreateThreadEx(NtCreateThreadExData {
+            target_pid: dest_pid,
+            start_routine: start_address as usize,
+            argument: argument as usize,
+        })));
 
         //
         // With the NtCreateThread API, before permitting the syscall to continue, we want to do some sanitisation
@@ -147,7 +161,8 @@ impl KernelSyscallIntercept {
         //
         // First - we need to check there are no outstanding Ghost Hunt's on the process from within the driver; this is to outright
         // prevent Hell's Gate type syscall malware behaviour. There is no realistic valid reason for a process to be doing direct
-        // / indirect syscalls..
+        // indirect syscalls.. This should be only ghost hunting timers of API's relevant to process injection to reduce the likelihood
+        // we will enter a spin.
         //
         // Second, we need to determine what the thread is pointing to, is it to:
         // - Classic library loading API's?
@@ -161,34 +176,48 @@ impl KernelSyscallIntercept {
         //
 
         if let Some(resolved) = ProcessMonitor::fn_pointer_to_sensitive_address(
-            dest_pid, 
             start_address
         ) {
             // todo logging? containment?
             println!("**** WARNING: Sensitive API detected in start thread!! {resolved:?}");
         }
 
-        let data = Syscall::from_kernel(
-            current_pid, 
-            NtFunction::NtCreateThreadEx(NtCreateThreadExData {
-            target_pid: dest_pid,
-            start_routine: start_address as usize,
-            argument: argument as usize,
-        }));
+        // Hold the thread until all the ghost hunting timers are resolved - this should really be done under paranoid mode
+        // as we don't want to exhaust / spin the system if this happens en-masse, but - perhaps for unknown processes 
+        // this could be a better option, such as an advanced blocking mechanism? For this POC, this is acceptable.
+        loop {
+            if let Ok(pending) = ProcessMonitor::process_has_pending_gh_transactions(
+                current_pid,
+                Some(
+                    NtFunctionMask::NtAllocateVirtualMemory as u64 | 
+                    NtFunctionMask::NtOpenProcess as u64 |
+                    NtFunctionMask::NtWriteVirtualMemory as u64
+                )
+             ) {
+                if !pending {
+                    println!("Inner 1?!");
+                    if ProcessMonitor::processes_has_disallowed_monitored_syscalls(current_pid) {
+                        println!("Inner 2?!");
+                        return (None, AllowSyscall::No);
+                    } else {
+                        return (None, AllowSyscall::Yes)
+                    }
+                }
+            }
 
-        Some(data)
+        }
     }
 
     fn nt_write_vm(
         ktrap_frame: KTRAP_FRAME,
-    ) -> Option<Syscall> {
+    ) -> (Option<Syscall>, AllowSyscall) {
 
         let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
         let dest_pid = handle_to_pid(ktrap_frame.Rcx as *mut c_void);
 
         // For now, we are not interested in self memory writes
         if current_pid == dest_pid {
-            return None;
+            return (None, AllowSyscall::Yes);
         }
 
         let data = Syscall::from_kernel(
@@ -202,12 +231,12 @@ impl KernelSyscallIntercept {
             )
         );
 
-        Some(data)
+        (Some(data), AllowSyscall::Yes)
     }
 
     fn nt_open_process(
         ktrap_frame: KTRAP_FRAME,
-    ) -> Option<Syscall> {
+    ) -> (Option<Syscall>, AllowSyscall) {
         
         let client_id: CLIENT_ID = unsafe { 
             *(ktrap_frame.R9 as *const CLIENT_ID)
@@ -218,27 +247,30 @@ impl KernelSyscallIntercept {
 
         // Currently only interested in foreign process handles
         if remote_pid == current_pid {
-            return None;
+            return (None, AllowSyscall::Yes);
         }
 
         let access_mask = ktrap_frame.Rdx as u32;
         
-        Some(
-            Syscall::from_kernel(
-                current_pid, 
-                NtFunction::NtOpenProcess(
-                    NtOpenProcessData {
-                        target_pid: remote_pid,
-                        desired_mask: access_mask,
-                    }
+        (
+            Some(
+                Syscall::from_kernel(
+                    current_pid, 
+                    NtFunction::NtOpenProcess(
+                        NtOpenProcessData {
+                            target_pid: remote_pid,
+                            desired_mask: access_mask,
+                        }
+                    )
                 )
-            )
+            ),
+            AllowSyscall::Yes
         )
     }
 
     fn nt_allocate_vm(
         ktrap_frame: KTRAP_FRAME,
-    ) -> Option<Syscall> {
+    ) -> (Option<Syscall>, AllowSyscall) {
         let proc_handle = ktrap_frame.Rcx as HANDLE;
 
         let current_pid = unsafe { PsGetCurrentProcessId() } as u32;
@@ -246,7 +278,7 @@ impl KernelSyscallIntercept {
 
         // for now we only care about remote memory allocations
         if current_pid == dest_pid {
-            return None;
+            return (None, AllowSyscall::Yes);
         }
 
         let base_address = ktrap_frame.Rdx as *const c_void;
@@ -270,7 +302,7 @@ impl KernelSyscallIntercept {
             )
         );
 
-        Some(syscall_data)
+        (Some(syscall_data), AllowSyscall::Yes)
     }
 }
 

@@ -35,6 +35,7 @@ pub enum DriverError {
     ImageSizeNotFound,
     ResourceStateInvalid,
     MutexError,
+    ProcessNotFound,
     UnexpectedSignature(String),
     Unknown(String),
 }
