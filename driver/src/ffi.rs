@@ -3,7 +3,11 @@
 use core::{ffi::c_void, ptr::null_mut};
 
 use wdk_sys::{
-    ntddk::{KeGetCurrentIrql, KeInitializeEvent}, ACCESS_MASK, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, LIST_ENTRY, NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE, PIO_STACK_LOCATION, PIRP, POBJECT_ATTRIBUTES, PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG, _EVENT_TYPE::SynchronizationEvent
+    _EVENT_TYPE::SynchronizationEvent,
+    ACCESS_MASK, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, LIST_ENTRY,
+    NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE, PIO_STACK_LOCATION, PIRP,
+    POBJECT_ATTRIBUTES, PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG,
+    ntddk::{KeGetCurrentIrql, KeInitializeEvent},
 };
 
 pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
@@ -90,7 +94,6 @@ unsafe extern "system" {
 
 #[repr(C, packed(2))]
 pub struct IMAGE_DOS_HEADER {
-
     pub e_magic: u16,
     pub e_cblp: u16,
     pub e_cp: u16,
@@ -131,7 +134,6 @@ pub struct IMAGE_DATA_DIRECTORY {
 
 #[repr(C, packed(4))]
 pub struct IMAGE_OPTIONAL_HEADER64 {
-
     pub Magic: u16,
     pub MajorLinkerVersion: u8,
     pub MinorLinkerVersion: u8,
@@ -188,7 +190,6 @@ pub struct IMAGE_EXPORT_DIRECTORY {
 
 #[repr(C)]
 pub struct PEB {
-
     pub Reserved1: [u8; 2],
     pub BeingDebugged: u8,
     pub Reserved2: [u8; 1],

@@ -13,6 +13,7 @@
         "Bazinga",
         "bindgen",
         "bitfields",
+        "bitflag",
         "bitmask",
         "callout",
         "CONTROLTRACE",

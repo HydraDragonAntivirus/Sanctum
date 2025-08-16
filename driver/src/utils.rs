@@ -1,5 +1,11 @@
 use core::{
-    arch::asm, ffi::{c_void, CStr}, iter::once, ptr::null_mut, slice::from_raw_parts, sync::atomic::Ordering
+    arch::asm,
+    ffi::{CStr, c_void},
+    iter::once,
+    ptr::null_mut,
+    slice::from_raw_parts,
+    sync::atomic::Ordering,
+    time::Duration,
 };
 
 use alloc::{
@@ -11,13 +17,26 @@ use alloc::{
 use shared_no_std::constants::SanctumVersion;
 use wdk::println;
 use wdk_sys::{
+    _EPROCESS, _KPROCESS, _KTHREAD, _LARGE_INTEGER,
+    _MODE::KernelMode,
+    DRIVER_OBJECT, FALSE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_OPEN_IF, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK,
+    LARGE_INTEGER, LIST_ENTRY, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES,
+    PASSIVE_LEVEL, PETHREAD, PHANDLE, POBJECT_ATTRIBUTES, PROCESS_ALL_ACCESS, PVOID, PsProcessType,
+    STATUS_SUCCESS, STRING, ULONG, UNICODE_STRING,
     ntddk::{
-        IoThreadToProcess, KeGetCurrentIrql, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetProcessId, RtlInitUnicodeString, RtlUnicodeStringToAnsiString, ZwClose, ZwCreateFile, ZwWriteFile
-    }, PsProcessType, DRIVER_OBJECT, FALSE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_OPEN_IF, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT, GENERIC_WRITE, HANDLE, IO_STATUS_BLOCK, LIST_ENTRY, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PASSIVE_LEVEL, PETHREAD, PHANDLE, POBJECT_ATTRIBUTES, PROCESS_ALL_ACCESS, PVOID, STATUS_SUCCESS, STRING, ULONG, UNICODE_STRING, _EPROCESS, _KPROCESS, _KTHREAD, _MODE::KernelMode
+        IoThreadToProcess, KeGetCurrentIrql, MmIsAddressValid, ObReferenceObjectByHandle,
+        ObfDereferenceObject, PsGetProcessId, RtlInitUnicodeString, RtlUnicodeStringToAnsiString,
+        ZwClose, ZwCreateFile, ZwWriteFile,
+    },
 };
 
 use crate::{
-    ffi::{InitializeObjectAttributes, PsGetProcessImageFileName, IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS64}, DRIVER_MESSAGES
+    DRIVER_MESSAGES,
+    ffi::{
+        IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY, IMAGE_NT_HEADERS64, InitializeObjectAttributes,
+        PsGetProcessImageFileName,
+    },
 };
 
 #[derive(Debug)]
@@ -35,6 +54,7 @@ pub enum DriverError {
     ImageSizeNotFound,
     ResourceStateInvalid,
     MutexError,
+    ProcessNotFound,
     UnexpectedSignature(String),
     Unknown(String),
 }
@@ -455,12 +475,12 @@ pub fn handle_to_pid(handle: HANDLE) -> u32 {
     let mut ob: *mut c_void = null_mut();
     _ = unsafe {
         ObReferenceObjectByHandle(
-            handle, 
-            PROCESS_ALL_ACCESS, 
-            *PsProcessType, 
-            KernelMode as _, 
+            handle,
+            PROCESS_ALL_ACCESS,
+            *PsProcessType,
+            KernelMode as _,
             &mut ob,
-            null_mut()
+            null_mut(),
         )
     };
 
@@ -476,7 +496,7 @@ pub fn handle_to_pid(handle: HANDLE) -> u32 {
 /// name is case **insensitive**.
 pub fn get_process_name() -> String {
     let mut pkthread: *mut c_void = null_mut();
-    
+
     unsafe {
         asm!(
             "mov {}, gs:[0x188]",
@@ -493,20 +513,20 @@ pub fn get_process_name() -> String {
         img = unsafe { img.add(1) };
         counter += 1;
     }
-    
+
     current_process_thread_name
 }
 
 /// Scan a module by its in memory base address for function offsets. The target param should NOT be null
 /// terminated.
-/// 
+///
 /// # Safety
 /// The caller is responsible for ensuring the `base` address points to valid expected memory (base address of the loaded
 /// module).
 pub unsafe fn scan_usermode_module_for_function_address(
     base: *const c_void,
     target: &str,
-) -> Result<*const c_void, DriverError>{
+) -> Result<*const c_void, DriverError> {
     // The memory should always be valid.. but.. Cannot use ProbeForRead as we don't
     // have access to __try :( this is as close as I can get right now I think
     if base.is_null() {
@@ -515,15 +535,15 @@ pub unsafe fn scan_usermode_module_for_function_address(
     }
 
     let dos = unsafe { &*(base as *const IMAGE_DOS_HEADER) };
-    if dos.e_magic != 0x5A4D { 
+    if dos.e_magic != 0x5A4D {
         return Err(DriverError::UnexpectedSignature("DOS Header".into()));
     }
 
     let nth = unsafe { &*(base.add(dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64) };
-    if nth.Signature != 0x00004550 { 
+    if nth.Signature != 0x00004550 {
         return Err(DriverError::UnexpectedSignature("NT Signarue".into()));
     }
-    if nth.OptionalHeader.Magic != 0x20B { 
+    if nth.OptionalHeader.Magic != 0x20B {
         return Err(DriverError::UnexpectedSignature("NT Magic".into()));
     }
 
@@ -536,7 +556,7 @@ pub unsafe fn scan_usermode_module_for_function_address(
         let exp = &*(rva(base as *const _, dir.VirtualAddress) as *const IMAGE_EXPORT_DIRECTORY);
 
         let names = rva(base as *const _, exp.AddressOfNames) as *const u32;
-        let ords  = rva(base as *const _, exp.AddressOfNameOrdinals) as *const u16;
+        let ords = rva(base as *const _, exp.AddressOfNameOrdinals) as *const u16;
         let funcs = rva(base as *const _, exp.AddressOfFunctions) as *const u32;
 
         for i in 0..exp.NumberOfNames {
@@ -545,7 +565,10 @@ pub unsafe fn scan_usermode_module_for_function_address(
             let mut p = name_ptr;
             let mut ok = true;
             for b in target.as_bytes() {
-                if *p != *b { ok = false; break; }
+                if *p != *b {
+                    ok = false;
+                    break;
+                }
                 p = p.add(1);
             }
             if ok && *p == 0 {
@@ -567,4 +590,11 @@ pub unsafe fn scan_usermode_module_for_function_address(
 #[inline(always)]
 unsafe fn rva<'a>(base: *const u8, off: u32) -> *const u8 {
     unsafe { base.add(off as usize) }
+}
+
+#[inline(always)]
+pub fn duration_to_large_int(dur: Duration) -> _LARGE_INTEGER {
+    LARGE_INTEGER {
+        QuadPart: -((dur.as_nanos() / 100) as i64),
+    }
 }

@@ -42,7 +42,10 @@ use ffi::IoGetCurrentIrpStackLocation;
 use shared_no_std::{
     constants::{DOS_DEVICE_NAME, NT_DEVICE_NAME, VERSION_DRIVER},
     ioctl::{
-        SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT, SANC_IOCTL_SEND_BASE_ADDRS
+        SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS,
+        SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN,
+        SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT,
+        SANC_IOCTL_SEND_BASE_ADDRS,
     },
 };
 use utils::{Log, LogLevel};
@@ -67,11 +70,12 @@ mod alt_syscalls;
 mod core;
 mod device_comms;
 mod ffi;
+mod response;
 mod utils;
 
 use wdk_alloc::WdkAllocator;
 
-use crate::core::process_monitor::{set_monitored_dll_fn_ptrs, MONITORED_FN_PTRS};
+use crate::core::process_monitor::{MONITORED_FN_PTRS, set_monitored_dll_fn_ptrs};
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 

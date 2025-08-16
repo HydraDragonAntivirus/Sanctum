@@ -1,18 +1,15 @@
 //! This module handles callback implementations and and other function related to processes.
 
-use core::{
-    arch::asm,
-    ffi::c_void,
-    ptr::null_mut, sync::atomic::Ordering,
-};
+use core::{arch::asm, ffi::c_void, ptr::null_mut, sync::atomic::Ordering};
 
 use wdk::{nt_success, println};
 use wdk_sys::{
-    ntddk::{ObfDereferenceObject, PsLookupThreadByThreadId, PsSetCreateThreadNotifyRoutine}, BOOLEAN, HANDLE, PETHREAD, PKTHREAD
+    BOOLEAN, HANDLE, PETHREAD, PKTHREAD,
+    ntddk::{ObfDereferenceObject, PsLookupThreadByThreadId, PsSetCreateThreadNotifyRoutine},
 };
 
 use crate::{
-    alt_syscalls::{g_alt_syscalls_enabled, AltSyscallStatus, AltSyscalls},
+    alt_syscalls::{AltSyscallStatus, AltSyscalls, g_alt_syscalls_enabled},
     utils::thread_to_process_name,
 };
 
@@ -30,7 +27,7 @@ pub fn set_thread_creation_callback() {
 ///
 /// **Note**, the thread ID of the newly created thread can be found in the `thread_id` parameter, and to look up its
 /// KTHREAD address, you must call into `PsLookupThreadByThreadId`.
-/// 
+///
 /// # Args
 /// - pid: The process ID of the process.
 /// - thread_id: The thread ID of the thread.
@@ -49,7 +46,6 @@ pub unsafe extern "C" fn thread_callback(
 }
 
 pub fn thread_reg_alt_callbacks(thread_id: *mut c_void) {
-
     let mut ke_thread: PETHREAD = null_mut();
     let thread_result = unsafe { PsLookupThreadByThreadId(thread_id as HANDLE, &mut ke_thread) };
 
@@ -61,13 +57,16 @@ pub fn thread_reg_alt_callbacks(thread_id: *mut c_void) {
     let thread_process_name = match thread_to_process_name(ke_thread as *mut _) {
         Ok(t) => t.to_lowercase(),
         Err(e) => {
-            println!("[sanctum] [-] Could not get process name on new thread creation. {:?}", e);
+            println!(
+                "[sanctum] [-] Could not get process name on new thread creation. {:?}",
+                e
+            );
             return;
-        },
+        }
     };
 
     AltSyscalls::configure_thread_for_alt_syscalls(ke_thread as *mut _, AltSyscallStatus::Enable);
     AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
-    
+
     unsafe { ObfDereferenceObject(ke_thread as *mut _) };
 }

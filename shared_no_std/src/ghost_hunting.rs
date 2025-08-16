@@ -1,11 +1,14 @@
+use core::arch::x86_64::_MM_HINT_NTA;
+
 use serde::{Deserialize, Serialize};
+use strum::EnumIter;
 
 /// Bitfields which act as a mask to determine which event types (kernel, syscall hook, etw etc)
 /// are required to fully cancel out the ghost hunt timers.
 ///
 /// This is because not all events are capturable in the kernel without tampering with patch guard etc, so there are some events
 /// only able to be caught by ETW and the syscall hook.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, EnumIter)]
 pub enum SyscallEventSource {
     EventSourceKernel = 0x1,
     EventSourceSyscallHook = 0x2,
@@ -58,24 +61,51 @@ impl Syscall {
     }
 }
 
-/// todo docs
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, EnumIter)]
+/// A representation of an Nt function which contains an inner data carrier for arguments we wish 
+/// to monitor related to that syscall directly.
+/// 
+/// This is also represented as a C style numbered enum which can be OR'ed into a flag. To see the 
+/// numeric types, see individual enum docs. To access this functionality, see [`NtFunction::as_mask`]
 pub enum NtFunction {
+    /// None is provided to allow `EnumIter` to work, this should never match anything
+    #[default]
+    None,
     NtOpenProcess(NtOpenProcessData),
     NtWriteVirtualMemory(NtWriteVirtualMemoryData),
     NtAllocateVirtualMemory(NtAllocateVirtualMemoryData),
     NtCreateThreadEx(NtCreateThreadExData),
 }
 
+impl NtFunction {
+    pub const M_NONE: u64               = 0x0;
+    pub const M_NT_OPEN_PROCESS: u64    = 1 << 0;
+    pub const M_NT_WRITE_VM: u64        = 1 << 1;
+    pub const M_NT_ALLOC_VM: u64           = 1 << 2;
+    pub const M_CREATE_THREAD_EX: u64   = 1 << 3;
+
+    pub fn as_mask(&self) -> u64 {
+        let m = match self {
+            NtFunction::None => Self::M_NONE,
+            NtFunction::NtOpenProcess(_) => Self::M_NT_OPEN_PROCESS,
+            NtFunction::NtWriteVirtualMemory(_) => Self::M_NT_WRITE_VM,
+            NtFunction::NtAllocateVirtualMemory(_) => Self::M_NT_ALLOC_VM,
+            NtFunction::NtCreateThreadEx(_) => Self::M_CREATE_THREAD_EX,
+        };
+
+        m
+    }
+}
+
 /// todo docs
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NtOpenProcessData {
     pub target_pid: u32,
     pub desired_mask: u32,
 }
 
 /// todo docs
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NtWriteVirtualMemoryData {
     pub target_pid: u32,
     pub base_address: usize,
@@ -84,7 +114,7 @@ pub struct NtWriteVirtualMemoryData {
 
 unsafe impl Send for Syscall {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NtAllocateVirtualMemoryData {
     pub dest_pid: u32,
     pub base_address: usize,
@@ -93,7 +123,7 @@ pub struct NtAllocateVirtualMemoryData {
     pub protect_flags: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Eq, PartialEq)]
 pub struct NtCreateThreadExData {
     pub target_pid: u32,
     pub start_routine: usize,

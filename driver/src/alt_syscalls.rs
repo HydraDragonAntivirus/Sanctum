@@ -8,20 +8,36 @@
 //! The mechanism of post processing [`queue_syscall_post_processing`] is using queued `wdk_mutex` and offloading the work to a system worker thread within
 //! the driver, as to not degrade system performance.
 
-use core::{arch::asm, ffi::{c_void, CStr}, ptr::null_mut, sync::atomic::{AtomicBool, Ordering}};
+use core::{
+    arch::asm,
+    ffi::{CStr, c_void},
+    ptr::null_mut,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use wdk::{nt_success, println};
 use wdk_sys::{
-    ntddk::{IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid, ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, PsGetProcessId, RtlInitUnicodeString, ZwClose}, IoFileObjectType, PsProcessType, PsThreadType, DEVICE_OBJECT, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, FILE_ANY_ACCESS, FILE_DEVICE_KEYBOARD, FILE_OBJECT, HANDLE, KTRAP_FRAME, LIST_ENTRY, METHOD_BUFFERED, OBJECT_ATTRIBUTES, OBJ_KERNEL_HANDLE, PDEVICE_OBJECT, PETHREAD, PHANDLE, PKTHREAD, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS, ULONG, UNICODE_STRING, _EPROCESS, _KTHREAD, _KTRAP_FRAME, _MODE::KernelMode
+    _EPROCESS, _KTHREAD, _KTRAP_FRAME,
+    _MODE::KernelMode,
+    DEVICE_OBJECT, DISPATCHER_HEADER, DRIVER_OBJECT, FALSE, FILE_ANY_ACCESS, FILE_DEVICE_KEYBOARD,
+    FILE_OBJECT, HANDLE, IoFileObjectType, KTRAP_FRAME, LIST_ENTRY, METHOD_BUFFERED,
+    OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES, PDEVICE_OBJECT, PETHREAD, PHANDLE, PKTHREAD,
+    PROCESS_ALL_ACCESS, PsProcessType, PsThreadType, THREAD_ALL_ACCESS, ULONG, UNICODE_STRING,
+    ntddk::{
+        IoGetCurrentProcess, IoThreadToProcess, MmGetSystemRoutineAddress, MmIsAddressValid,
+        ObReferenceObjectByHandle, ObfDereferenceObject, PsGetCurrentProcessId, PsGetProcessId,
+        RtlInitUnicodeString, ZwClose,
+    },
 };
 
 use crate::{
-    core::syscall_processing::
-        KernelSyscallIntercept
-    , ffi::{ZwGetNextProcess, ZwGetNextThread}, utils::{
-        get_module_base_and_sz, get_process_name, scan_module_for_byte_pattern, thread_to_process_name, DriverError
-    }
+    core::syscall_processing::{AllowSyscall, KernelSyscallIntercept},
+    ffi::{ZwGetNextProcess, ZwGetNextThread},
+    utils::{
+        DriverError, get_module_base_and_sz, get_process_name, scan_module_for_byte_pattern,
+        thread_to_process_name,
+    },
 };
 
 const SLOT_ID: u32 = 0;
@@ -250,14 +266,13 @@ impl AltSyscalls {
         status: AltSyscallStatus,
         isolated_processes: Option<&[&str]>,
     ) {
-
         match status {
             AltSyscallStatus::Enable => {
                 g_alt_syscalls_enabled.store(true, Ordering::SeqCst);
-            },
+            }
             AltSyscallStatus::Disable => {
                 g_alt_syscalls_enabled.store(false, Ordering::SeqCst);
-            },
+            }
         }
 
         let current_process = unsafe { IoGetCurrentProcess() };
@@ -267,9 +282,9 @@ impl AltSyscalls {
         }
 
         //
-        // Walk the active processes & threads via reference counting to ensure that the 
+        // Walk the active processes & threads via reference counting to ensure that the
         // threads & processes aren't terminated during the walk (led to race condition).
-        // 
+        //
         // For each process & thread, enable to relevant bits for Alt Syscalls.
         //
 
@@ -282,13 +297,15 @@ impl AltSyscalls {
         let mut handles: Vec<HANDLE> = Vec::new();
 
         loop {
-            let result = unsafe { ZwGetNextProcess(
-                cur_proc,
-                PROCESS_ALL_ACCESS,
-                OBJ_KERNEL_HANDLE,
-                0,
-                &mut next_proc,
-            ) };
+            let result = unsafe {
+                ZwGetNextProcess(
+                    cur_proc,
+                    PROCESS_ALL_ACCESS,
+                    OBJ_KERNEL_HANDLE,
+                    0,
+                    &mut next_proc,
+                )
+            };
 
             if result != 0 || cur_proc == next_proc {
                 break;
@@ -298,14 +315,16 @@ impl AltSyscalls {
 
             // Now walk the threads of the process
             loop {
-                let result = unsafe { ZwGetNextThread(
-                    cur_proc,
-                    cur_thread,
-                    THREAD_ALL_ACCESS,
-                    OBJ_KERNEL_HANDLE,
-                    0,
-                    &mut next_thread
-                ) };
+                let result = unsafe {
+                    ZwGetNextThread(
+                        cur_proc,
+                        cur_thread,
+                        THREAD_ALL_ACCESS,
+                        OBJ_KERNEL_HANDLE,
+                        0,
+                        &mut next_thread,
+                    )
+                };
 
                 if result != 0 || cur_thread == next_thread {
                     break;
@@ -313,7 +332,7 @@ impl AltSyscalls {
 
                 cur_thread = next_thread;
 
-                let mut pe_thread: *mut c_void  = null_mut();
+                let mut pe_thread: *mut c_void = null_mut();
 
                 let _ = unsafe {
                     ObReferenceObjectByHandle(
@@ -321,15 +340,15 @@ impl AltSyscalls {
                         THREAD_ALL_ACCESS,
                         *PsThreadType,
                         KernelMode as _,
-                        &mut pe_thread, 
-                        null_mut()
+                        &mut pe_thread,
+                        null_mut(),
                     )
                 };
 
                 if !pe_thread.is_null() {
                     // Before we actually go ahead and set the bits; we wanna check whether the caller is requesting the bits
                     // set ONLY on certain processes. The below logic will check whether that argument is Some, and if so,
-                    // check the process information to set the bits. 
+                    // check the process information to set the bits.
                     // If it is `None`, we will skip the check and just set all process & thread info
 
                     if let Some(proc_vec) = &isolated_processes {
@@ -344,8 +363,13 @@ impl AltSyscalls {
                                             "[sanctum] [+] Process name found for alt syscalls: {}",
                                             needle
                                         );
-                                        Self::configure_thread_for_alt_syscalls(pe_thread as *mut _, status);
-                                        Self::configure_process_for_alt_syscalls(pe_thread as *mut _);
+                                        Self::configure_thread_for_alt_syscalls(
+                                            pe_thread as *mut _,
+                                            status,
+                                        );
+                                        Self::configure_process_for_alt_syscalls(
+                                            pe_thread as *mut _,
+                                        );
                                     }
                                 }
                             }
@@ -391,7 +415,7 @@ struct KThreadLocalDef {
 }
 
 #[inline(always)]
-fn extract_trap() -> Option<*const _KTRAP_FRAME>{ 
+fn extract_trap() -> Option<*const _KTRAP_FRAME> {
     let mut k_thread: *const c_void = null_mut();
     unsafe {
         asm!(
@@ -408,7 +432,6 @@ fn extract_trap() -> Option<*const _KTRAP_FRAME>{
     let p_ktrap = unsafe { &*(k_thread as *const KThreadLocalDef) }.k_trap_ptr;
 
     Some(p_ktrap)
-
 }
 
 /// The callback routine which we control to run when a system call is dispatched via my alt syscall technique.
@@ -434,43 +457,29 @@ pub unsafe extern "system" fn syscall_handler(
     _args_base: *const c_void,
     _p3_home: *const c_void,
 ) -> i32 {
-
     // todo remove once ready for mass testing
     let proc_name = get_process_name().to_lowercase();
-    if !proc_name.contains("malware.e")
-    {
+    if !proc_name.contains("malware.e") {
         return 1;
     }
 
     let ktrap_frame = match extract_trap() {
-        Some(p) => unsafe {*p},
+        Some(p) => unsafe { *p },
         None => {
             println!("[-] [sanctum] Could not get trap for syscall intercept.");
-            return 1
-        },
+            return 1;
+        }
     };
 
-    match ssn {
-        SSN_NT_OPEN_PROCESS 
-            | SSN_NT_ALLOCATE_VIRTUAL_MEMORY
-            | SSN_NT_WRITE_VM 
-            | SSN_NT_CREATE_THREAD_EX => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
-        // 0x4e => {
-        //     println!(
-        //         "[create thread] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
-        //         ssn, rcx, rsp
-        //     );
-        // }
-        // 0xc9 => {
-        //     println!(
-        //         "[create thread ex] [i] Hook. SSN {:#x}, rcx as usize: {}. Stack ptr: {:p}",
-        //         ssn, rcx, rsp
-        //     );
-        // }
-        _ => (),
-    }
+    let allowed = match ssn {
+        SSN_NT_OPEN_PROCESS
+        | SSN_NT_ALLOCATE_VIRTUAL_MEMORY
+        | SSN_NT_WRITE_VM
+        | SSN_NT_CREATE_THREAD_EX => KernelSyscallIntercept::from_alt_syscall(ktrap_frame),
+        _ => AllowSyscall::Yes,
+    };
 
-    1
+    allowed as i32
 }
 
 /// Get the address of the non-exported kernel symbol: `PspServiceDescriptorGroupTable`

@@ -14,15 +14,24 @@
 //!   Ghost Hunting telemetry
 
 use core::{
-    ffi::c_void, iter::once, ptr::null_mut, sync::atomic::{AtomicPtr, Ordering}, time::Duration
+    ffi::c_void,
+    iter::once,
+    ptr::null_mut,
+    sync::atomic::{AtomicPtr, Ordering},
+    time::Duration,
 };
 
 use alloc::{
-    boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, vec::Vec
+    boxed::Box,
+    collections::btree_map::BTreeMap,
+    format,
+    string::{String, ToString},
+    vec::Vec,
 };
 use shared_no_std::{
     driver_ipc::ProcessStarted,
-    ghost_hunting::{NtFunction, Syscall, SyscallEventSource}, ioctl::BaseAddressesOfMonitoredDlls,
+    ghost_hunting::{NtFunction, Syscall, SyscallEventSource},
+    ioctl::BaseAddressesOfMonitoredDlls,
 };
 use wdk::{nt_success, println};
 use wdk_mutex::{
@@ -31,13 +40,26 @@ use wdk_mutex::{
     grt::Grt,
 };
 use wdk_sys::{
+    _EPROCESS, _IO_STACK_LOCATION, _LARGE_INTEGER,
+    _MODE::KernelMode,
+    HANDLE, LARGE_INTEGER, LIST_ENTRY, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES,
+    PIRP, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, PsProcessType, SECTION_MAP_READ,
+    SECTION_QUERY, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, UNICODE_STRING,
     ntddk::{
-        IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise, MmMapViewInSystemSpace, MmUnmapViewInSystemSpace, ObOpenObjectByPointer, ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, PsGetProcessId, RtlInitUnicodeString, ZwClose, ZwOpenSection
-    }, PsProcessType, HANDLE, LARGE_INTEGER, LIST_ENTRY, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, PIRP, PROCESS_ALL_ACCESS, PROCESS_BASIC_INFORMATION, SECTION_MAP_READ, SECTION_QUERY, STATUS_SUCCESS, THREAD_ALL_ACCESS, TRUE, UNICODE_STRING, _EPROCESS, _IO_STACK_LOCATION, _LARGE_INTEGER, _MODE::KernelMode
+        IoGetCurrentProcess, KeDelayExecutionThread, KeQuerySystemTimePrecise,
+        MmMapViewInSystemSpace, MmUnmapViewInSystemSpace, ObOpenObjectByPointer,
+        ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, PsGetProcessId,
+        RtlInitUnicodeString, ZwClose, ZwOpenSection,
+    },
 };
 
+pub use crate::core::process_monitor::process::Process;
+
 use crate::{
-    device_comms::IoctlBuffer, ffi::{InitializeObjectAttributes, NtQueryInformationProcess}, utils::{eprocess_to_process_name, scan_usermode_module_for_function_address, DriverError}
+    device_comms::IoctlBuffer,
+    ffi::{InitializeObjectAttributes, NtQueryInformationProcess},
+    response::{ReportEventType, ReportInfo, contain_and_report},
+    utils::{DriverError, eprocess_to_process_name, scan_usermode_module_for_function_address},
 };
 
 pub static MONITORED_FN_PTRS: AtomicPtr<MonitoredApis> = AtomicPtr::new(null_mut());
@@ -46,37 +68,144 @@ pub static MONITORED_FN_PTRS: AtomicPtr<MonitoredApis> = AtomicPtr::new(null_mut
 pub struct MonitoredApis {
     /// A BTreeMap containing the function's virtual address as a usize,
     /// and a tuple of (dll name, and the API as a [`SensitiveAPI`])
-    inner: BTreeMap<usize, (String, SensitiveAPI)>
+    inner: BTreeMap<usize, (String, SensitiveAPI)>,
 }
 
-/// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
-/// onto it, can be tracked and monitored.
-#[derive(Debug)]
-pub struct Process {
-    pub pid: u32,
-    /// Parent pid
-    pub ppid: u32,
-    pub process_image: String,
-    pub commandline_args: String,
-    pub risk_score: u16,
-    pub allow_listed: bool, // whether the application is allowed to exist without monitoring
-    /// Creates a time window in which a process handle must match from a hooked syscall with
-    /// the kernel receiving the notification. Failure to match this may be an indicator of hooked syscall evasion.
-    pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
-    targeted_by_apis: Vec<ProcessTargetedApis>,
-    marked_for_deletion: bool,
-    // Note: It is possible atm for any processes started before the EDR was switched on that
-    // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
-    // a problem.
-    // todo fix
-    loaded_modules: Option<LoadedModules>,
+mod process {
+    use alloc::{string::String, vec::Vec};
+
+    use crate::{
+        core::process_monitor::{GhostHuntingTimer, LoadedModules, ProcessTargetedApis},
+        response::{self, DRIVER_MODE},
+    };
+
+    /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
+    /// onto it, can be tracked and monitored.
+    #[derive(Debug, Clone, Default)]
+    pub struct Process {
+        pub pid: u32,
+        /// Parent pid
+        pub ppid: u32,
+        pub process_image: String,
+        pub commandline_args: String,
+        pub risk_score: u16,
+        pub allow_listed: bool, // whether the application is allowed to exist without monitoring
+        /// Creates a time window in which a process handle must match from a hooked syscall with
+        /// the kernel receiving the notification. Failure to match this may be an indicator of hooked syscall evasion.
+        pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
+        targeted_by_apis: Vec<ProcessTargetedApis>,
+        /// Has the process been marked for termination (not by us, but through naturally terminating)
+        pub marked_for_deletion: bool,
+        /// Setting this to `true` will allow blocked syscalls to 'complete' but without actually dispatching the syscall.
+        /// This marker should not be added when the EDR is in report only mode.
+        monitored_syscalls_disallowed: bool,
+        // Note: It is possible atm for any processes started before the EDR was switched on that
+        // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
+        // a problem.
+        pub loaded_modules: Option<LoadedModules>,
+    }
+
+    impl Process {
+        pub fn new(pid: u32, ppid: u32, process_image: String, commandline_args: String) -> Self {
+            Self {
+                pid,
+                ppid,
+                process_image,
+                commandline_args,
+                ..Default::default()
+            }
+        }
+        /// Adds a ghost hunt timer specifically to a process.
+        ///
+        /// This function will internally deal with cases where a timer for the same API already exists. If the timer already exists, it will
+        /// use bit flags to
+        pub fn add_ghost_hunt_timer(&mut self, new_timer: GhostHuntingTimer) {
+            // If the timers are empty; then its the first in so we can add it to the list straight up.
+            if self.ghost_hunting_timers.is_empty() {
+                self.ghost_hunting_timers.push(new_timer);
+                return;
+            }
+
+            // Otherwise, there is data in the ghost hunting timers ...
+            for (index, timer_iter) in self.ghost_hunting_timers.iter_mut().enumerate() {
+                // If the API Origin that this fn relates to is found in the list of cancellable APIs then cancel them out.
+                // Part of the core Ghost Hunting logic. First though we need to check that the event type that can cancel it out
+                // is present in the active flags (bugs were happening where other events of the same type were being XOR'ed, so if they
+                // were previously unset, the flag  was being reset and the process was therefore failing).
+                // To get around this we do a bitwise& check before running the XOR in unset_event_flag_in_timer.
+                if core::mem::discriminant(&timer_iter.event_type)
+                    == core::mem::discriminant(&new_timer.event_type)
+                {
+                    if timer_iter.origin != new_timer.origin {
+                        self.ghost_hunting_timers.remove(index);
+                        return;
+                    }
+                }
+            }
+
+            self.ghost_hunting_timers.push(new_timer);
+        }
+
+        /// Determines whether the process has outstanding ghost hunting transactions, applied with either a bitflag or not.
+        /// For no flags, `None` should be given, which indicates that the caller only wants to know "are there any outstanding
+        /// Ghost Hunting timers whatsoever?".
+        ///
+        /// Should this value be set to `Some`, it should consist of an ORed bitflag indicating which syscalls the caller cares
+        /// about checking outstanding Ghost Hunt timers for.
+        pub fn has_outstanding_gh_transactions(&self, flags: Option<u64>) -> bool {
+            if let Some(flags) = flags {
+                let mut active = 0;
+                for t in &self.ghost_hunting_timers {
+                    active |= t.event_type.as_mask();
+                }
+
+                return (active & flags) != 0;
+            } else {
+                !self.ghost_hunting_timers.is_empty()
+            }
+        }
+
+        /// Returns whether the process is allowed to proceed with syscalls which are monitored. If badness is detected, before a
+        /// process is terminated it is possible for the offending process to make a syscall which leads to something bad happening,
+        /// that under [`DriverMode::Blocking`] we can prevent.
+        ///
+        /// If the EDR is in [`DriverMode::ReportOnly`] mode, this function will always return `false`.
+        ///
+        /// Otherwise, the function will determine if the halt flag is raised which will block any monitored choke point syscalls.
+        pub fn are_syscalls_blocked(&self) -> bool {
+            if DRIVER_MODE == response::DriverMode::ReportOnly {
+                return true;
+            }
+
+            self.monitored_syscalls_disallowed
+        }
+
+        /// Raises the flag to prevent dangerous syscalls from completing, usually this should only be used at the point where
+        /// we could be in a / near a syscall, but we want to terminate the process. An example of this is where direct/indirect syscalls
+        /// are detected; but this could be during the dispatch of sensitive SSN's which are pending.
+        ///
+        /// If the EDR is set in [`DriverMode::ReportOnly`], this function wll do nothing.
+        ///
+        /// # Args
+        /// The function accepts a `flag` which can be `true` or `false`, as to whether the EDR should block those syscalls. Realistically,
+        /// this function will likely only be used with this set to `true`, you should consider the effects of setting this, then unsetting this.
+        ///
+        /// # Safety
+        /// This function is marked as unsafe as it can have profound effects on the system if set to `true` incorrectly. Carefully consider
+        /// the effects of blocking system calls if this does not directly lead to process containment.
+        pub unsafe fn set_syscall_blocking(&mut self, flag: bool) {
+            if DRIVER_MODE == response::DriverMode::Blocking {
+                self.monitored_syscalls_disallowed = flag;
+            }
+        }
+    }
 }
 
 /// A BTreeMap of loaded modules in the process, with:
-/// 
+///
 /// - `key`: Module name
 /// `value`: [`LoadedModule`]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LoadedModules {
     inner: BTreeMap<String, LoadedModule>,
 }
@@ -89,17 +218,14 @@ pub enum SensitiveAPI {
 }
 
 /// A representation of a module loaded into a process.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct LoadedModule {
     image_base: *const c_void,
     image_sz: usize,
 }
 
 impl LoadedModule {
-    pub fn new(
-        image_base: *const c_void,
-        image_sz: usize,
-    ) -> Self {
+    pub fn new(image_base: *const c_void, image_sz: usize) -> Self {
         Self {
             image_base,
             image_sz,
@@ -121,7 +247,7 @@ pub struct Kernel32Addresses {
 }
 
 // todo needs implementing
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProcessTargetedApis;
 
 /// A `GhostHuntingTimer` is the timer metadata associated with the Ghost Hunting technique on my blog:
@@ -137,9 +263,27 @@ pub struct GhostHuntingTimer {
     pub origin: SyscallEventSource,
 }
 
+impl ReportInfo for GhostHuntingTimer {
+    fn explain(&self) -> String {
+        format!(
+            "The Ghost Hunting system detected abuse within a process strongly indicating that direct / indirect syscalls \
+            are being used. This technique is common for malware which is trying to evade EDR by bypassing mechanisms that the \
+            EDR can provide in its DLL. The process should be analysed for indications of malware. The system call and its \
+            respective data responsible for this event is: {:?}.",
+            self.event_type,
+        )
+    }
+
+    fn event_type() -> ReportEventType {
+        ReportEventType::GhostHunt
+    }
+}
+
 impl core::fmt::Debug for GhostHuntingTimer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "GhostHuntingTimer: \
+        write!(
+            f,
+            "GhostHuntingTimer: \
             timer_start: {}, \
             event_type: {:?}, \
             origin: {:?}",
@@ -183,9 +327,23 @@ impl ProcessMonitor {
         let mut processes = BTreeMap::<u32, Process>::new();
         walk_processes_get_details(&mut processes);
 
-        println!("[sanctum] [i] Process monitor discovered {} processes on start.", processes.len());
+        println!(
+            "[sanctum] [i] Process monitor discovered {} processes on start.",
+            processes.len()
+        );
 
         Grt::register_fast_mutex("ProcessMonitor", processes)
+    }
+
+    pub fn block_syscalls_for_proc(pid: u32) -> bool {
+        let process_list = Self::get_mtx_inner();
+        if let Some(process) = process_list.get(&pid) {
+            return process.are_syscalls_blocked();
+        }
+
+        // todo handle the error case where we didn't get a valid mapped process, maybe evidence of
+        // rootkit unhooking processes?
+        false
     }
 
     pub fn onboard_new_process(process: &ProcessStarted) -> Result<(), ProcessErrors> {
@@ -195,39 +353,30 @@ impl ProcessMonitor {
             return Err(ProcessErrors::DuplicatePid);
         }
 
-        // todo this actually needs filling out with the relevant data
-        process_monitor_lock.insert(process.pid, Process {
-            pid: process.pid,
-            ppid: process.parent_pid,
-            process_image: process.image_name.clone(),
-            commandline_args: process.command_line.clone(),
-            risk_score: 0,
-            allow_listed: false,
-            ghost_hunting_timers: Vec::new(),
-            targeted_by_apis: Vec::new(),
-            marked_for_deletion: false,
-            // Setting this to None should be ok now as the module data should come in once the modules
-            // load into the process.
-            loaded_modules: None,
-        });
+        process_monitor_lock.insert(
+            process.pid,
+            Process::new(
+                process.pid,
+                process.parent_pid,
+                process.image_name.clone(),
+                process.command_line.clone(),
+            ),
+        );
 
         Ok(())
     }
 
-    pub fn add_loaded_module(
-        mut lm: LoadedModule,
-        image_name: &String,
-        pid: u32,
-    ) {
-
+    pub fn add_loaded_module(lm: LoadedModule, image_name: &String, pid: u32) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
 
         let process = match process_lock.get_mut(&pid) {
             Some(process) => process,
             None => {
-                println!("[sanctum] [-] PID {pid} not found in active processes when trying to add image load info.");
+                println!(
+                    "[sanctum] [-] PID {pid} not found in active processes when trying to add image load info."
+                );
                 return;
-            },
+            }
         };
 
         if let Some(process_loaded_mods) = process.loaded_modules.as_mut() {
@@ -239,8 +388,7 @@ impl ProcessMonitor {
         }
     }
 
-    pub fn fn_pointer_to_sensitive_address(pid: u32, requested_addr: *const c_void) -> Option<SensitiveAPI> {
-
+    pub fn fn_pointer_to_sensitive_address(requested_addr: *const c_void) -> Option<SensitiveAPI> {
         let monitored_fn_ptrs = MONITORED_FN_PTRS.load(Ordering::SeqCst);
         if monitored_fn_ptrs.is_null() {
             println!("[sanctum] [-] Monitored fn ptrs was null, this should be reported.");
@@ -248,7 +396,10 @@ impl ProcessMonitor {
             return None;
         }
 
-        if let Some((_, api)) = unsafe { &*monitored_fn_ptrs }.inner.get(&(requested_addr as usize)) {
+        if let Some((_, api)) = unsafe { &*monitored_fn_ptrs }
+            .inner
+            .get(&(requested_addr as usize))
+        {
             return Some(*api);
         }
 
@@ -261,24 +412,26 @@ impl ProcessMonitor {
 
         //
         // We want to remove a process from the monitor only once any pending transactions have been completed.
-        // This will ensure that if malware does something bad, which we are waiting on other telemetry for, and the 
+        // This will ensure that if malware does something bad, which we are waiting on other telemetry for, and the
         // process terminates before we have chance to receive that telemetry, that the incident does not get lost.
         // In the case there are outstanding transactions, we will mark the process for termination; only once all transactions
         // are closed.
         //
         // The logic for monitoring those transactions will be held elsewhere (in the main worker thread for Process Monitoring)
-        // 
+        //
 
         let process = match process_lock.get_mut(&pid) {
             Some(process) => process,
             None => {
-                println!("[sanctum] [-] PID {pid} not found in active processes when trying to remove process.");
+                println!(
+                    "[sanctum] [-] PID {pid} not found in active processes when trying to remove process."
+                );
                 return;
-            },
+            }
         };
 
         // If it has outstanding, mark for deletion until those are completed
-        if process.has_outstanding_transactions() {
+        if process.has_outstanding_gh_transactions(None) {
             process.marked_for_deletion = true;
             return;
         }
@@ -309,9 +462,8 @@ impl ProcessMonitor {
         let mut pids_to_remove: Vec<u32> = Vec::new();
 
         for (_, process) in process_lock.iter_mut() {
-            if process.marked_for_deletion &&
-                !process.has_outstanding_transactions() {
-                    pids_to_remove.push(process.pid);
+            if process.marked_for_deletion && !process.has_outstanding_gh_transactions(None) {
+                pids_to_remove.push(process.pid);
             }
         }
 
@@ -324,13 +476,11 @@ impl ProcessMonitor {
     /// with kernel events sent from our driver.
     ///
     /// This is part of my Ghost Hunting technique https://fluxsec.red/edr-syscall-hooking
-    pub fn poll_ghost_timers(
-        max_time_allowed: _LARGE_INTEGER,
-    ) {
+    pub fn poll_ghost_timers(max_time_allowed: _LARGE_INTEGER) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
-        
+        let mut processes_to_terminate = Vec::new();
+
         for (_, process) in process_lock.iter_mut() {
-            
             if process.ghost_hunting_timers.is_empty() {
                 continue;
             }
@@ -341,21 +491,27 @@ impl ProcessMonitor {
             //
             // We can use the `extract_if` unstable API for `Vec`
             //
-            
-            for expired_timer in process.ghost_hunting_timers.extract_if(.., |t| {
+
+            for timer in process.ghost_hunting_timers.extract_if(.., |t| {
                 let mut current_time = LARGE_INTEGER::default();
                 unsafe { KeQuerySystemTimePrecise(&mut current_time) };
 
                 let time_delta = unsafe { current_time.QuadPart - t.timer_start.QuadPart };
                 time_delta > unsafe { max_time_allowed.QuadPart }
             }) {
-                    // todo risk score
-                    // process.update_process_risk_score(item.weight);
-                    println!(
-                        "[sanctum] *** TIMER EXCEEDED on: {:?}, pid responsible: {}",
-                        expired_timer.event_type, process.pid
-                    );
-                    // todo telemetry
+                println!(
+                    "Dealing with bad timer... and it should have extracted? {:?}",
+                    timer
+                );
+                processes_to_terminate.push((process.pid, timer.clone()));
+            }
+        }
+
+        drop(process_lock);
+
+        if !processes_to_terminate.is_empty() {
+            for p in processes_to_terminate {
+                respond_to_gh_timer_expiry(p.0, &p.1);
             }
         }
     }
@@ -383,6 +539,13 @@ impl ProcessMonitor {
         process_lock
     }
 
+    pub fn disallow_syscalls(pid: u32) {
+        let mut ps = Self::get_mtx_inner();
+        if let Some(p) = ps.get_mut(&pid) {
+            unsafe { p.set_syscall_blocking(true) };
+        }
+    }
+
     /// Spawns a system thread to poll Ghost Hunting timers and do other work on behalf of the [`ProcessMonitor`].
     ///
     /// # Panics
@@ -404,9 +567,7 @@ impl ProcessMonitor {
         };
 
         if thread_status != STATUS_SUCCESS {
-            println!(
-                "[sanctum] [-] Could not create new thread for the process monitor."
-            );
+            println!("[sanctum] [-] Could not create new thread for the process monitor.");
             panic!();
         }
 
@@ -443,48 +604,29 @@ impl ProcessMonitor {
             panic!()
         }
     }
-}
 
-impl Process {
-    /// Adds a ghost hunt timer specifically to a process.
+    /// Determines whether the process has outstanding ghost hunting transactions, applied with either a bitflag or not.
+    /// For no mask, `None` should be given, which indicates that the caller only wants to know "are there any outstanding
+    /// Ghost Hunting timers whatsoever?".
     ///
-    /// This function will internally deal with cases where a timer for the same API already exists. If the timer already exists, it will
-    /// use bit flags to
-    fn add_ghost_hunt_timer(&mut self, new_timer: GhostHuntingTimer) {
-        // If the timers are empty; then its the first in so we can add it to the list straight up.
-        if self.ghost_hunting_timers.is_empty() {
-            self.ghost_hunting_timers.push(new_timer);
-            return;
+    /// Should this value be set to `Some`, it should consist of an ORed bitflag indicating which syscalls the caller cares
+    /// about checking outstanding Ghost Hunt timers for.
+    pub fn process_has_pending_gh_transactions(
+        pid: u32,
+        mask: Option<u64>,
+    ) -> Result<bool, DriverError> {
+        let mut process_lock = ProcessMonitor::get_mtx_inner();
+
+        if let Some(process) = process_lock.get_mut(&pid) {
+            return Ok(process.has_outstanding_gh_transactions(mask));
         }
 
-        // Otherwise, there is data in the ghost hunting timers ...
-        for (index, timer_iter) in self.ghost_hunting_timers.iter_mut().enumerate() {
-            // If the API Origin that this fn relates to is found in the list of cancellable APIs then cancel them out.
-            // Part of the core Ghost Hunting logic. First though we need to check that the event type that can cancel it out
-            // is present in the active flags (bugs were happening where other events of the same type were being XOR'ed, so if they
-            // were previously unset, the flag  was being reset and the process was therefore failing).
-            // To get around this we do a bitwise& check before running the XOR in unset_event_flag_in_timer.
-            if core::mem::discriminant(&timer_iter.event_type)
-                == core::mem::discriminant(&new_timer.event_type)
-            {
-                if timer_iter.origin != new_timer.origin {
-                    self.ghost_hunting_timers.remove(index);
-                    return;
-                }
-            }
-        }
-
-        self.ghost_hunting_timers.push(new_timer);
-    }
-
-    fn has_outstanding_transactions(&self) -> bool {
-        !self.ghost_hunting_timers.is_empty()
+        return Err(DriverError::ProcessNotFound);
     }
 }
 
 /// Worker thread entry point. Sleeps once per second, polls all `ghost_hunting_timers`, and exits when the driver is unloaded.
-unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {    
-
+unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {
     let delay_as_duration = Duration::from_millis(200);
     let mut thread_sleep_time = LARGE_INTEGER {
         QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
@@ -494,14 +636,11 @@ unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {
     let max_time_allowed_for_ghost_hunting_delta = LARGE_INTEGER {
         QuadPart: ((max_time_allowed_for_ghost_hunting_delta.as_nanos() / 100) as i64),
     };
- 
+
     loop {
-        let _ = unsafe { KeDelayExecutionThread(
-            KernelMode as _, 
-            TRUE as _, 
-            &mut thread_sleep_time
-        )};
-        
+        let _ =
+            unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
+
         ProcessMonitor::poll_ghost_timers(max_time_allowed_for_ghost_hunting_delta);
         ProcessMonitor::remove_stale_processes();
 
@@ -514,9 +653,8 @@ unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {
 }
 
 fn process_monitor_thread_termination_flag_raised() -> bool {
-    let terminate_flag_lock: &FastMutex<bool> = match Grt::get_fast_mutex(
-            "TERMINATION_FLAG_GH_MONITOR",
-        ) {
+    let terminate_flag_lock: &FastMutex<bool> =
+        match Grt::get_fast_mutex("TERMINATION_FLAG_GH_MONITOR") {
             Ok(lock) => lock,
             Err(e) => {
                 // Maybe this should terminate the thread instead? This would be a bad error to have as it means we cannot.
@@ -528,16 +666,16 @@ fn process_monitor_thread_termination_flag_raised() -> bool {
                 return false;
             }
         };
-        let lock = match terminate_flag_lock.lock() {
-            Ok(lock) => lock,
-            Err(e) => {
-                println!(
-                    "[sanctum] [-] Failed to lock mutex for terminate_flag_lock/ {:?}",
-                    e
-                );
-                return false;
-            }
-        };
+    let lock = match terminate_flag_lock.lock() {
+        Ok(lock) => lock,
+        Err(e) => {
+            println!(
+                "[sanctum] [-] Failed to lock mutex for terminate_flag_lock/ {:?}",
+                e
+            );
+            return false;
+        }
+    };
 
     *lock
 }
@@ -608,8 +746,10 @@ fn walk_processes_get_details(processes: &mut BTreeMap<u32, Process>) {
 /// - pid
 /// - parent pid
 /// - image name (not full path)
-fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Process, DriverError> {
-
+fn extract_process_details<'a>(
+    process: *mut _EPROCESS,
+    pid: usize,
+) -> Result<Process, DriverError> {
     let process_name = eprocess_to_process_name(process as *mut _)?;
     let mut out_sz = 0;
 
@@ -660,25 +800,15 @@ fn extract_process_details<'a>(process: *mut _EPROCESS, pid: usize) -> Result<Pr
 
     let ppid = process_information.InheritedFromUniqueProcessId as u32;
 
-    Ok(Process {
-        pid: pid as _,
+    Ok(Process::new(
+        pid as _,
         ppid,
-        process_image: process_name.to_string(),
-        commandline_args: String::new(),
-        risk_score: 0,
-        allow_listed: false,
-        ghost_hunting_timers: Vec::new(),
-        targeted_by_apis: Vec::new(),
-        marked_for_deletion: false,
-        // todo - do we need to grab these?
-        loaded_modules: None,
-    })
+        process_name.to_string(),
+        String::new(),
+    ))
 }
 
-pub fn set_monitored_dll_fn_ptrs(
-    p_stack_location: *mut _IO_STACK_LOCATION,
-    pirp: PIRP,
-) {
+pub fn set_monitored_dll_fn_ptrs(p_stack_location: *mut _IO_STACK_LOCATION, pirp: PIRP) {
     let mut ioctl_buffer = IoctlBuffer::new(p_stack_location, pirp);
     match ioctl_buffer.receive() {
         Ok(i) => i,
@@ -693,23 +823,17 @@ pub fn set_monitored_dll_fn_ptrs(
 
     let input_data: &BaseAddressesOfMonitoredDlls = unsafe { &*input_data };
 
-    let ldr_load_dll_rva = extract_monitored_user_fn_ptrs_as_rva(
-        r"\KnownDlls\ntdll.dll",
-        "LdrLoadDll"
-    );
-    let lla = extract_monitored_user_fn_ptrs_as_rva(
-        r"\KnownDlls\kernel32.dll",
-        "LoadLibraryA"
-    );
-    let llw = extract_monitored_user_fn_ptrs_as_rva(
-        r"\KnownDlls\kernel32.dll",
-        "LoadLibraryW"
-    );
+    let ldr_load_dll_rva =
+        extract_monitored_user_fn_ptrs_as_rva(r"\KnownDlls\ntdll.dll", "LdrLoadDll");
+    let lla = extract_monitored_user_fn_ptrs_as_rva(r"\KnownDlls\kernel32.dll", "LoadLibraryA");
+    let llw = extract_monitored_user_fn_ptrs_as_rva(r"\KnownDlls\kernel32.dll", "LoadLibraryW");
 
     if ldr_load_dll_rva.is_none() || lla.is_none() || llw.is_none() {
-        println!("[sanctum] [!!] FATAL: An expected DLL offset was None. Cannot continue. \
+        println!(
+            "[sanctum] [!!] FATAL: An expected DLL offset was None. Cannot continue. \
         {ldr_load_dll_rva:?}, {lla:?}, {llw:?}\
-        ");
+        "
+        );
         panic!()
     }
 
@@ -718,38 +842,42 @@ pub fn set_monitored_dll_fn_ptrs(
     let llw = llw.unwrap() + input_data.kernel32;
 
     let mut btm = BTreeMap::new();
-    btm.insert(ldr_load_dll, ("ntdll.dll".to_string(), SensitiveAPI::LdrLoadDll));
-    btm.insert(lla, ("kernel32.dll".to_string(), SensitiveAPI::LoadLibraryA));
-    btm.insert(llw, ("kernel32.dll".to_string(), SensitiveAPI::LoadLibraryW));
-
-    let apis = Box::new(
-        MonitoredApis {
-            inner: btm,
-        }
+    btm.insert(
+        ldr_load_dll,
+        ("ntdll.dll".to_string(), SensitiveAPI::LdrLoadDll),
+    );
+    btm.insert(
+        lla,
+        ("kernel32.dll".to_string(), SensitiveAPI::LoadLibraryA),
+    );
+    btm.insert(
+        llw,
+        ("kernel32.dll".to_string(), SensitiveAPI::LoadLibraryW),
     );
 
-    let apis = Box::into_raw(apis);
-    
-    MONITORED_FN_PTRS.store(apis, Ordering::SeqCst);
+    let apis = Box::new(MonitoredApis { inner: btm });
 
+    let apis = Box::into_raw(apis);
+
+    MONITORED_FN_PTRS.store(apis, Ordering::SeqCst);
 }
 
-fn extract_monitored_user_fn_ptrs_as_rva(
-    path: &str, name: &str
-) -> Option<usize> {
+fn extract_monitored_user_fn_ptrs_as_rva(path: &str, name: &str) -> Option<usize> {
     let mut handle: *mut c_void = null_mut();
     let u16buf: alloc::vec::Vec<u16> = path.encode_utf16().chain(once(0)).collect();
     let mut us_path = UNICODE_STRING::default();
     unsafe { RtlInitUnicodeString(&mut us_path, u16buf.as_ptr()) };
-    
+
     let mut oa: OBJECT_ATTRIBUTES = OBJECT_ATTRIBUTES::default();
-    if let Err(_)  = unsafe { InitializeObjectAttributes(
-        &mut oa, 
-        &mut us_path,
-        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
-        null_mut(),
-        null_mut(),
-    ) } {
+    if let Err(_) = unsafe {
+        InitializeObjectAttributes(
+            &mut oa,
+            &mut us_path,
+            OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+            null_mut(),
+            null_mut(),
+        )
+    } {
         println!("[sanctum] [-] Error with object attributes.");
         return None;
     }
@@ -762,14 +890,16 @@ fn extract_monitored_user_fn_ptrs_as_rva(
     }
 
     let mut section_obj: *mut c_void = null_mut();
-    let status = unsafe { ObReferenceObjectByHandle(
-        handle,
-        SECTION_MAP_READ,
-        null_mut(),
-        KernelMode as _,
-        &mut section_obj,
-        null_mut(),
-    ) };
+    let status = unsafe {
+        ObReferenceObjectByHandle(
+            handle,
+            SECTION_MAP_READ,
+            null_mut(),
+            KernelMode as _,
+            &mut section_obj,
+            null_mut(),
+        )
+    };
     if !nt_success(status) {
         let _ = unsafe { ZwClose(handle) };
         println!("[sanctum] [-] ObReferenceObjectByHandle bad call.");
@@ -787,10 +917,7 @@ fn extract_monitored_user_fn_ptrs_as_rva(
         return None;
     }
 
-    let result_absolute = unsafe { scan_usermode_module_for_function_address(
-        base, 
-        name,
-    ) };
+    let result_absolute = unsafe { scan_usermode_module_for_function_address(base, name) };
 
     let _ = unsafe { MmUnmapViewInSystemSpace(base) };
     let _ = unsafe { ObfDereferenceObject(section_obj) };
@@ -804,5 +931,17 @@ fn extract_monitored_user_fn_ptrs_as_rva(
     let relative: usize = kernel_absolute as usize - base as usize;
 
     Some(relative)
+}
 
+/// Determines what to do in the case of detecting an expired [`GhostHuntingTimer`], as not all timers are created equal.
+/// There are edge cases around certain timers going off which may not inherently be bad behaviour (depending on edge cases
+/// as they crop up).
+fn respond_to_gh_timer_expiry(pid: u32, timer: &GhostHuntingTimer) {
+    match &timer.event_type {
+        NtFunction::None => (),
+        NtFunction::NtOpenProcess(_)
+        | NtFunction::NtWriteVirtualMemory(_)
+        | NtFunction::NtAllocateVirtualMemory(_)
+        | NtFunction::NtCreateThreadEx(_) => contain_and_report(pid, timer),
+    }
 }
