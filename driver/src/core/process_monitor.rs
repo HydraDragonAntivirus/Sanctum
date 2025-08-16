@@ -106,12 +106,7 @@ mod process {
     }
 
     impl Process {
-        pub fn new(
-            pid: u32,
-            ppid: u32,
-            process_image: String,
-            commandline_args: String,
-        ) -> Self {
+        pub fn new(pid: u32, ppid: u32, process_image: String, commandline_args: String) -> Self {
             Self {
                 pid,
                 ppid,
@@ -358,12 +353,15 @@ impl ProcessMonitor {
             return Err(ProcessErrors::DuplicatePid);
         }
 
-        process_monitor_lock.insert(process.pid, Process::new(
+        process_monitor_lock.insert(
             process.pid,
-            process.parent_pid, 
-            process.image_name.clone(),
-            process.command_line.clone(),
-        ));
+            Process::new(
+                process.pid,
+                process.parent_pid,
+                process.image_name.clone(),
+                process.command_line.clone(),
+            ),
+        );
 
         Ok(())
     }
@@ -803,10 +801,10 @@ fn extract_process_details<'a>(
     let ppid = process_information.InheritedFromUniqueProcessId as u32;
 
     Ok(Process::new(
-        pid as _, 
-        ppid, 
+        pid as _,
+        ppid,
         process_name.to_string(),
-        String::new()
+        String::new(),
     ))
 }
 

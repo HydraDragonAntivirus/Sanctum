@@ -205,6 +205,9 @@ impl KernelSyscallIntercept {
                     // remove thread if we are in blocking mode and have detected bad behaviour.
                     // This MAY need some performance measurements and further investigation in the
                     // future, but works as a POC for now
+
+                    // todo there is an occasional race condition here where the syscall DID successfully execute
+                    // but on other occasions, it was prevented. Maybe we need to block more explicitly. To investigate.
                     if ProcessMonitor::block_syscalls_for_proc(current_pid) {
                         return (None, AllowSyscall::No);
                     } else {

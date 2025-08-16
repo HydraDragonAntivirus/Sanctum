@@ -1,5 +1,4 @@
 use alloc::string::String;
-use wdk::println;
 
 use crate::{core::process_monitor::ProcessMonitor, response::containment::Containment};
 
@@ -22,7 +21,6 @@ pub enum ReportEventType {
 /// Block mode.
 pub fn contain_and_report<T: ReportInfo>(pid: u32, details: &T) {
     if DRIVER_MODE == DriverMode::Blocking {
-        println!("Disallowing syscalls on process..");
         ProcessMonitor::disallow_syscalls(pid);
         Containment::contain_process(pid);
     }

@@ -2,7 +2,8 @@ use core::{ffi::c_void, ptr::null_mut};
 
 use wdk::{nt_success, println};
 use wdk_sys::{
-    CLIENT_ID, NTSTATUS, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES, PROCESS_ALL_ACCESS,
+    CLIENT_ID, NTSTATUS, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES, PASSIVE_LEVEL, PROCESS_ALL_ACCESS,
+    STATUS_UNSUCCESSFUL,
     ntddk::{KeGetCurrentIrql, ZwOpenProcess, ZwTerminateProcess},
 };
 
@@ -22,7 +23,7 @@ pub struct Containment {}
 
 impl Containment {
     pub fn contain_process(pid: u32) {
-        println!("[sanctum] [*] Containing process: {pid}");
+        println!("[sanctum] [i] Containing process: {pid}");
         // todo actual containment
 
         let _ = terminate_process(pid);
@@ -47,8 +48,14 @@ fn terminate_process(pid: u32) -> NTSTATUS {
         UniqueThread: null_mut(),
     };
 
+    // The IRQL required to call into ZwOpenProcess is PASSIVE_LEVEL, doing so > PASSIVE_LEVEL will cause a bugcheck.
     let irql = unsafe { KeGetCurrentIrql() };
-    println!("About to open process? IRQL: {irql}");
+    if irql != PASSIVE_LEVEL as u8 {
+        // todo fix this in the future; if the IRQL is too high and this prevents the blocking of malware,
+        // that would obviously be a bad thing!
+        println!("[sanctum] [-] Cannot terminate process, IRQL is too high. IRQL: {irql}.");
+        return STATUS_UNSUCCESSFUL;
+    }
 
     let status = unsafe { ZwOpenProcess(&mut handle, PROCESS_ALL_ACCESS, &mut oa, &mut client_id) };
 
@@ -60,7 +67,7 @@ fn terminate_process(pid: u32) -> NTSTATUS {
     let status = unsafe { ZwTerminateProcess(handle, 1) };
 
     if !nt_success(status) {
-        println!("[sanctum] [-] Error terminating process.")
+        println!("[sanctum] [-] Error terminating process. Error code: {status:#X}");
     }
 
     status
