@@ -14,6 +14,8 @@ pub enum DriverMode {
     Blocking,
 }
 
+// todo we need to set this via an IOCTL; we can get this from the telemetry server.
+// To prevent this being mutable, a device reboot is required for a change to take effect.
 pub static DRIVER_MODE: DriverMode = DriverMode::Blocking;
 
 pub struct Containment {}

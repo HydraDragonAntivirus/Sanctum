@@ -1,10 +1,9 @@
 use alloc::string::String;
 use wdk::println;
 
-use crate::{
-    core::process_monitor::ProcessMonitor,
-    response::containment::{Containment, DRIVER_MODE, DriverMode},
-};
+use crate::{core::process_monitor::ProcessMonitor, response::containment::Containment};
+
+pub use containment::{DRIVER_MODE, DriverMode};
 
 mod containment;
 mod reporting;

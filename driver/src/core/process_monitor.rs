@@ -53,6 +53,8 @@ use wdk_sys::{
     },
 };
 
+pub use crate::core::process_monitor::process::Process;
+
 use crate::{
     device_comms::IoctlBuffer,
     ffi::{InitializeObjectAttributes, NtQueryInformationProcess},
@@ -69,31 +71,139 @@ pub struct MonitoredApis {
     inner: BTreeMap<usize, (String, SensitiveAPI)>,
 }
 
-/// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
-/// onto it, can be tracked and monitored.
-#[derive(Debug, Clone)]
-pub struct Process {
-    pub pid: u32,
-    /// Parent pid
-    pub ppid: u32,
-    pub process_image: String,
-    pub commandline_args: String,
-    pub risk_score: u16,
-    pub allow_listed: bool, // whether the application is allowed to exist without monitoring
-    /// Creates a time window in which a process handle must match from a hooked syscall with
-    /// the kernel receiving the notification. Failure to match this may be an indicator of hooked syscall evasion.
-    pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
-    targeted_by_apis: Vec<ProcessTargetedApis>,
-    marked_for_deletion: bool,
-    /// Whether the process is marked to be for containment. Setting this to `true` will allow blocked syscalls to
-    /// 'complete' but without actually dispatching the syscall. This marker should not be added when the EDR is in
-    /// report only mode.
-    monitored_syscalls_disallowed: bool,
-    // Note: It is possible atm for any processes started before the EDR was switched on that
-    // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
-    // a problem.
-    // todo fix
-    loaded_modules: Option<LoadedModules>,
+mod process {
+    use alloc::{string::String, vec::Vec};
+
+    use crate::{
+        core::process_monitor::{GhostHuntingTimer, LoadedModules, ProcessTargetedApis},
+        response::{self, DRIVER_MODE},
+    };
+
+    /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
+    /// onto it, can be tracked and monitored.
+    #[derive(Debug, Clone, Default)]
+    pub struct Process {
+        pub pid: u32,
+        /// Parent pid
+        pub ppid: u32,
+        pub process_image: String,
+        pub commandline_args: String,
+        pub risk_score: u16,
+        pub allow_listed: bool, // whether the application is allowed to exist without monitoring
+        /// Creates a time window in which a process handle must match from a hooked syscall with
+        /// the kernel receiving the notification. Failure to match this may be an indicator of hooked syscall evasion.
+        pub ghost_hunting_timers: Vec<GhostHuntingTimer>,
+        targeted_by_apis: Vec<ProcessTargetedApis>,
+        /// Has the process been marked for termination (not by us, but through naturally terminating)
+        pub marked_for_deletion: bool,
+        /// Setting this to `true` will allow blocked syscalls to 'complete' but without actually dispatching the syscall.
+        /// This marker should not be added when the EDR is in report only mode.
+        monitored_syscalls_disallowed: bool,
+        // Note: It is possible atm for any processes started before the EDR was switched on that
+        // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
+        // a problem.
+        pub loaded_modules: Option<LoadedModules>,
+    }
+
+    impl Process {
+        pub fn new(
+            pid: u32,
+            ppid: u32,
+            process_image: String,
+            commandline_args: String,
+        ) -> Self {
+            Self {
+                pid,
+                ppid,
+                process_image,
+                commandline_args,
+                ..Default::default()
+            }
+        }
+        /// Adds a ghost hunt timer specifically to a process.
+        ///
+        /// This function will internally deal with cases where a timer for the same API already exists. If the timer already exists, it will
+        /// use bit flags to
+        pub fn add_ghost_hunt_timer(&mut self, new_timer: GhostHuntingTimer) {
+            // If the timers are empty; then its the first in so we can add it to the list straight up.
+            if self.ghost_hunting_timers.is_empty() {
+                self.ghost_hunting_timers.push(new_timer);
+                return;
+            }
+
+            // Otherwise, there is data in the ghost hunting timers ...
+            for (index, timer_iter) in self.ghost_hunting_timers.iter_mut().enumerate() {
+                // If the API Origin that this fn relates to is found in the list of cancellable APIs then cancel them out.
+                // Part of the core Ghost Hunting logic. First though we need to check that the event type that can cancel it out
+                // is present in the active flags (bugs were happening where other events of the same type were being XOR'ed, so if they
+                // were previously unset, the flag  was being reset and the process was therefore failing).
+                // To get around this we do a bitwise& check before running the XOR in unset_event_flag_in_timer.
+                if core::mem::discriminant(&timer_iter.event_type)
+                    == core::mem::discriminant(&new_timer.event_type)
+                {
+                    if timer_iter.origin != new_timer.origin {
+                        self.ghost_hunting_timers.remove(index);
+                        return;
+                    }
+                }
+            }
+
+            self.ghost_hunting_timers.push(new_timer);
+        }
+
+        /// Determines whether the process has outstanding ghost hunting transactions, applied with either a bitflag or not.
+        /// For no flags, `None` should be given, which indicates that the caller only wants to know "are there any outstanding
+        /// Ghost Hunting timers whatsoever?".
+        ///
+        /// Should this value be set to `Some`, it should consist of an ORed bitflag indicating which syscalls the caller cares
+        /// about checking outstanding Ghost Hunt timers for.
+        pub fn has_outstanding_gh_transactions(&self, flags: Option<u64>) -> bool {
+            if let Some(flags) = flags {
+                let mut active = 0;
+                for t in &self.ghost_hunting_timers {
+                    active |= t.event_type.as_mask();
+                }
+
+                return (active & flags) != 0;
+            } else {
+                !self.ghost_hunting_timers.is_empty()
+            }
+        }
+
+        /// Returns whether the process is allowed to proceed with syscalls which are monitored. If badness is detected, before a
+        /// process is terminated it is possible for the offending process to make a syscall which leads to something bad happening,
+        /// that under [`DriverMode::Blocking`] we can prevent.
+        ///
+        /// If the EDR is in [`DriverMode::ReportOnly`] mode, this function will always return `false`.
+        ///
+        /// Otherwise, the function will determine if the halt flag is raised which will block any monitored choke point syscalls.
+        pub fn are_syscalls_blocked(&self) -> bool {
+            if DRIVER_MODE == response::DriverMode::ReportOnly {
+                return true;
+            }
+
+            self.monitored_syscalls_disallowed
+        }
+
+        /// Raises the flag to prevent dangerous syscalls from completing, usually this should only be used at the point where
+        /// we could be in a / near a syscall, but we want to terminate the process. An example of this is where direct/indirect syscalls
+        /// are detected; but this could be during the dispatch of sensitive SSN's which are pending.
+        ///
+        /// If the EDR is set in [`DriverMode::ReportOnly`], this function wll do nothing.
+        ///
+        /// # Args
+        /// The function accepts a `flag` which can be `true` or `false`, as to whether the EDR should block those syscalls. Realistically,
+        /// this function will likely only be used with this set to `true`, you should consider the effects of setting this, then unsetting this.
+        ///
+        /// # Safety
+        /// This function is marked as unsafe as it can have profound effects on the system if set to `true` incorrectly. Carefully consider
+        /// the effects of blocking system calls if this does not directly lead to process containment.
+        pub unsafe fn set_syscall_blocking(&mut self, flag: bool) {
+            if DRIVER_MODE == response::DriverMode::Blocking {
+                self.monitored_syscalls_disallowed = flag;
+            }
+        }
+    }
 }
 
 /// A BTreeMap of loaded modules in the process, with:
@@ -230,13 +340,13 @@ impl ProcessMonitor {
         Grt::register_fast_mutex("ProcessMonitor", processes)
     }
 
-    pub fn is_blocking_syscalls(pid: u32) -> bool {
+    pub fn block_syscalls_for_proc(pid: u32) -> bool {
         let process_list = Self::get_mtx_inner();
         if let Some(process) = process_list.get(&pid) {
-            return process.monitored_syscalls_disallowed;
+            return process.are_syscalls_blocked();
         }
 
-        // todo handle the error case where we didnt get a valid mapped process, maybe evidence of
+        // todo handle the error case where we didn't get a valid mapped process, maybe evidence of
         // rootkit unhooking processes?
         false
     }
@@ -248,22 +358,12 @@ impl ProcessMonitor {
             return Err(ProcessErrors::DuplicatePid);
         }
 
-        // todo this actually needs filling out with the relevant data
-        process_monitor_lock.insert(process.pid, Process {
-            pid: process.pid,
-            ppid: process.parent_pid,
-            process_image: process.image_name.clone(),
-            commandline_args: process.command_line.clone(),
-            risk_score: 0,
-            allow_listed: false,
-            ghost_hunting_timers: Vec::new(),
-            targeted_by_apis: Vec::new(),
-            marked_for_deletion: false,
-            // Setting this to None should be ok now as the module data should come in once the modules
-            // load into the process.
-            loaded_modules: None,
-            monitored_syscalls_disallowed: false,
-        });
+        process_monitor_lock.insert(process.pid, Process::new(
+            process.pid,
+            process.parent_pid, 
+            process.image_name.clone(),
+            process.command_line.clone(),
+        ));
 
         Ok(())
     }
@@ -444,7 +544,7 @@ impl ProcessMonitor {
     pub fn disallow_syscalls(pid: u32) {
         let mut ps = Self::get_mtx_inner();
         if let Some(p) = ps.get_mut(&pid) {
-            p.monitored_syscalls_disallowed = true;
+            unsafe { p.set_syscall_blocking(true) };
         }
     }
 
@@ -524,58 +624,6 @@ impl ProcessMonitor {
         }
 
         return Err(DriverError::ProcessNotFound);
-    }
-}
-
-impl Process {
-    /// Adds a ghost hunt timer specifically to a process.
-    ///
-    /// This function will internally deal with cases where a timer for the same API already exists. If the timer already exists, it will
-    /// use bit flags to
-    fn add_ghost_hunt_timer(&mut self, new_timer: GhostHuntingTimer) {
-        // If the timers are empty; then its the first in so we can add it to the list straight up.
-        if self.ghost_hunting_timers.is_empty() {
-            self.ghost_hunting_timers.push(new_timer);
-            return;
-        }
-
-        // Otherwise, there is data in the ghost hunting timers ...
-        for (index, timer_iter) in self.ghost_hunting_timers.iter_mut().enumerate() {
-            // If the API Origin that this fn relates to is found in the list of cancellable APIs then cancel them out.
-            // Part of the core Ghost Hunting logic. First though we need to check that the event type that can cancel it out
-            // is present in the active flags (bugs were happening where other events of the same type were being XOR'ed, so if they
-            // were previously unset, the flag  was being reset and the process was therefore failing).
-            // To get around this we do a bitwise& check before running the XOR in unset_event_flag_in_timer.
-            if core::mem::discriminant(&timer_iter.event_type)
-                == core::mem::discriminant(&new_timer.event_type)
-            {
-                if timer_iter.origin != new_timer.origin {
-                    self.ghost_hunting_timers.remove(index);
-                    return;
-                }
-            }
-        }
-
-        self.ghost_hunting_timers.push(new_timer);
-    }
-
-    /// Determines whether the process has outstanding ghost hunting transactions, applied with either a bitflag or not.
-    /// For no flags, `None` should be given, which indicates that the caller only wants to know "are there any outstanding
-    /// Ghost Hunting timers whatsoever?".
-    ///
-    /// Should this value be set to `Some`, it should consist of an ORed bitflag indicating which syscalls the caller cares
-    /// about checking outstanding Ghost Hunt timers for.
-    fn has_outstanding_gh_transactions(&self, flags: Option<u64>) -> bool {
-        if let Some(flags) = flags {
-            let mut active = 0;
-            for t in &self.ghost_hunting_timers {
-                active |= t.event_type.as_mask();
-            }
-
-            return (active & flags) != 0;
-        } else {
-            !self.ghost_hunting_timers.is_empty()
-        }
     }
 }
 
@@ -754,20 +802,12 @@ fn extract_process_details<'a>(
 
     let ppid = process_information.InheritedFromUniqueProcessId as u32;
 
-    Ok(Process {
-        pid: pid as _,
-        ppid,
-        process_image: process_name.to_string(),
-        commandline_args: String::new(),
-        risk_score: 0,
-        allow_listed: false,
-        ghost_hunting_timers: Vec::new(),
-        targeted_by_apis: Vec::new(),
-        marked_for_deletion: false,
-        // todo - do we need to grab these?
-        loaded_modules: None,
-        monitored_syscalls_disallowed: false,
-    })
+    Ok(Process::new(
+        pid as _, 
+        ppid, 
+        process_name.to_string(),
+        String::new()
+    ))
 }
 
 pub fn set_monitored_dll_fn_ptrs(p_stack_location: *mut _IO_STACK_LOCATION, pirp: PIRP) {
