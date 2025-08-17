@@ -777,9 +777,9 @@ impl ImageLoadQueueForInjector {
 
         if lock.insert(pid) == false {
             println!(
-                "[sanctum] [i] ImageLoadQueuePendingInjection had duplicate key for pid: {pid}, this should not occur."
+                "[sanctum] [i] ImageLoadQueuePendingInjection had duplicate key for pid: {pid}. This requires some further \
+                    investigation at some point."
             );
-            panic!(); // maybe bsod here? this state should never occur
         }
     }
 

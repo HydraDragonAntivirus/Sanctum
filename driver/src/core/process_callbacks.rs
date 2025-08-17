@@ -1,36 +1,47 @@
 //! This module handles callback implementations and and other function related to processes.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
+    arch::asm,
     ffi::c_void,
     iter::once,
     ptr::{null_mut, slice_from_raw_parts},
     sync::atomic::Ordering,
-    time::Duration,
 };
-use shared_no_std::driver_ipc::{HandleObtained, ProcessStarted, ProcessTerminated};
-use wdk::println;
+use shared_no_std::driver_ipc::{HandleObtained, ProcessStarted};
+use wdk::{nt_success, println};
 use wdk_sys::{
     _IMAGE_INFO,
-    _MODE::KernelMode,
+    _MODE::{KernelMode, UserMode},
     _OB_PREOP_CALLBACK_STATUS::OB_PREOP_SUCCESS,
-    _UNICODE_STRING, APC_LEVEL, HANDLE, LARGE_INTEGER, NTSTATUS, OB_CALLBACK_REGISTRATION,
-    OB_FLT_REGISTRATION_VERSION, OB_OPERATION_HANDLE_CREATE, OB_OPERATION_HANDLE_DUPLICATE,
-    OB_OPERATION_REGISTRATION, OB_PRE_OPERATION_INFORMATION, OB_PREOP_CALLBACK_STATUS, PEPROCESS,
-    PROCESS_ALL_ACCESS, PS_CREATE_NOTIFY_INFO, PsProcessType, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
-    TRUE, UNICODE_STRING,
+    _SECTION_INHERIT::ViewUnmap,
+    _UNICODE_STRING, APC_LEVEL, FILE_EXECUTE, FILE_NON_DIRECTORY_FILE, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_SYNCHRONOUS_IO_NONALERT, HANDLE, IO_STATUS_BLOCK, KAPC, MEM_COMMIT, MEM_RESERVE, NTSTATUS,
+    OB_CALLBACK_REGISTRATION, OB_FLT_REGISTRATION_VERSION, OB_OPERATION_HANDLE_CREATE,
+    OB_OPERATION_HANDLE_DUPLICATE, OB_OPERATION_REGISTRATION, OB_PRE_OPERATION_INFORMATION,
+    OB_PREOP_CALLBACK_STATUS, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES,
+    PAGE_EXECUTE_READ, PAGE_READWRITE, PEPROCESS, PKTHREAD, PRKAPC, PROCESS_ALL_ACCESS,
+    PS_CREATE_NOTIFY_INFO, PVOID, PsProcessType, SEC_IMAGE, SECTION_MAP_EXECUTE, SECTION_MAP_READ,
+    SECTION_MAP_WRITE, STANDARD_RIGHTS_ALL, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, SYNCHRONIZE,
+    UNICODE_STRING,
     ntddk::{
-        KeDelayExecutionThread, KeGetCurrentIrql, ObOpenObjectByPointer, ObRegisterCallbacks,
-        PsGetCurrentProcessId, PsGetProcessId, PsRemoveLoadImageNotifyRoutine,
-        PsSetLoadImageNotifyRoutine, RtlInitUnicodeString,
+        KeGetCurrentIrql, ObOpenObjectByPointer, ObRegisterCallbacks, PsGetCurrentProcessId,
+        PsGetProcessId, PsRemoveLoadImageNotifyRoutine, PsSetLoadImageNotifyRoutine,
+        RtlCopyMemoryNonTemporal, RtlInitUnicodeString, ZwAllocateVirtualMemory, ZwClose,
+        ZwCreateSection, ZwMapViewOfSection, ZwOpenFile,
     },
 };
 
 use crate::{
     DRIVER_MESSAGES, REGISTRATION_HANDLE,
-    core::process_monitor::{LoadedModule, ProcessMonitor},
+    core::process_monitor::{LoadedModule, MONITORED_FN_PTRS, ProcessMonitor, SensitiveAPI},
     device_comms::ImageLoadQueueForInjector,
-    utils::unicode_to_string,
+    ffi::{
+        InitializeObjectAttributes, KeInitializeApc, KeInsertQueueApc, PKNORMAL_ROUTINE,
+        PsGetCurrentProcess,
+    },
+    utils::{get_process_name, unicode_to_string},
 };
 
 /// Callback function for a new process being created on the system.
@@ -323,37 +334,289 @@ extern "C" fn image_load_callback(
     // Depending on performance; we could also fast hash the "sanctum.dll"  bytes to see whether it matches the expected DLL -
     // this *may* be more performant than accessing the Grt, but for now, this works.
     //
-    // todo would be nice to make an API for this as we will likely want to use this in various other places in the EDR.
 
-    // todo the match here should be done on the full path to accidental prevent name collisions
+    // todo the match here should be done on the full path to accidental prevent name collisions / threat vectors that way
     if name.ends_with("sanctum.dll") {
-        if ImageLoadQueueForInjector::remove_pid_from_injection_waitlist(pid as usize).is_err() {
-            // todo handle threat detection here
-        }
-    }
+        println!(
+            "******************* SANCTUM DLL INJECTED, proc: {}",
+            get_process_name()
+        );
+        // if ImageLoadQueueForInjector::remove_pid_from_injection_waitlist(pid as usize).is_err() {
+        //     // todo handle threat detection here
+        // }
 
-    // For now, only inject into these processes whilst we test
-    if !name.contains("malware.exe") {
+        // Track in ProcessMonitor
+        let lm = LoadedModule::new(image_info.ImageBase as _, image_info.ImageSize as _);
+        ProcessMonitor::add_loaded_module(lm, &name, pid as u32);
+
+        // We can now enable alt syscalls on this process as the DLL is loaded so techniques like Ghost Hunting etc shouldn't
+        // cause issues.
         return;
     }
 
-    ImageLoadQueueForInjector::queue_process_for_usermode(pid as usize);
+    let mut k_thread: *const c_void = null_mut();
+    unsafe {
+        asm!(
+            "mov {}, gs:[0x188]",
+            out(reg) k_thread,
+        );
+    }
 
-    let delay_as_duration = Duration::from_millis(300);
-    let mut thread_sleep_time = LARGE_INTEGER {
-        QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
+    if k_thread.is_null() {
+        println!("[-] [Sanctum] No KTHREAD discovered.");
+        return;
+    }
+
+    println!("Doing the thing, img name: {name}");
+    if let Some(path_addr) = write_dl_path() {
+        register_apc_for_sanctum_dll_load(k_thread as *mut _, path_addr);
+    }
+
+    // For now, only inject into these processes whilst we test
+    // if !name.contains("malware.exe") {
+    //     return;
+    // }
+
+    // ImageLoadQueueForInjector::queue_process_for_usermode(pid as usize);
+
+    // let mut thread_sleep_time = duration_to_large_int(Duration::from_secs(1));
+
+    // loop {
+    //     // todo I'd rather use a KEVENT than a loop - just need to think about the memory model for it.
+    //     // Tried implementing this now, but as im at POC phase it required quite a bit of a refactor, so i'll do this in the
+    //     // future more likely. Leaving the todo in to work on this later :)
+    //     // The least we can do is make the threat alertable so we aren't starving too many resources.
+    //     let _ =
+    //         unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
+
+    //     if !ImageLoadQueueForInjector::pid_in_waitlist(pid as usize) {
+    //         break;
+    //     }
+
+    //     println!("In loop for: {}", get_process_name());
+    // }
+}
+
+fn register_apc_for_sanctum_dll_load(thread: PKTHREAD, dll_allocation_addr: *mut c_void) {
+    // todo turn this into a helper API maybe in utils
+    let mut apc = Box::new(KAPC::default());
+    let p_normal_routine = MONITORED_FN_PTRS.load(Ordering::SeqCst);
+    if p_normal_routine.is_null() {
+        println!("[sanctum] [-] p_normal_routine was null. Cannot continue");
+        return;
+    }
+
+    let mut addr: *const c_void = null_mut();
+    unsafe { &*p_normal_routine }
+        .inner
+        .iter()
+        .for_each(|entry| {
+            if entry.1.1 == SensitiveAPI::LoadLibraryW {
+                addr = *entry.0 as *const c_void;
+            }
+        });
+
+    if addr.is_null() {
+        println!("[sanctum] [-] Did not get the address of LoadLibraryW");
+        return;
+    }
+
+    let pid = unsafe { PsGetCurrentProcessId() } as u32;
+    println!(
+        "[{} | {pid}], LLW addr: {addr:p}, alloc addr: {dll_allocation_addr:p}",
+        get_process_name()
+    );
+
+    unsafe {
+        KeInitializeApc(
+            &mut *apc,
+            thread,
+            crate::ffi::_KAPC_ENVIRONMENT::OriginalApcEnvironment,
+            Some(apc_callback_inject_sanctum),
+            None,
+            Some(addr),
+            UserMode as i8,
+            dll_allocation_addr,
+        );
+    }
+
+    let res = unsafe { KeInsertQueueApc(&mut *apc, null_mut(), null_mut(), 0) };
+    if res == 0 {
+        println!("FAIL Result of KeInsertQueueApc: {res:#X}");
+        return;
+    }
+
+    // todo mem leak? needs ref counting?
+    let raw = Box::into_raw(apc);
+}
+
+/// The function that runs in kernel mode on our APC callback occurring. This function will allow
+/// us to alter `NormalContext`, `SystemArgument1`, `SystemArgument2` which will be passed to the normal
+/// routine.
+unsafe extern "C" fn apc_callback_inject_sanctum(
+    apc: PRKAPC,
+    normal_routine: PKNORMAL_ROUTINE,
+    normal_context: *mut PVOID,
+    system_arg_1: *mut PVOID,
+    system_arg_2: *mut PVOID,
+) {
+}
+
+unsafe extern "C" fn normal_routine(arg1: PVOID, arg2: PVOID, arg3: PVOID) {
+    if unsafe { KeGetCurrentIrql() } >= APC_LEVEL as u8 {
+        println!("[sanctum] [-] IRQL too high for callback injecting sanctum.dll");
+        return;
+    }
+
+    let mut process_handle: HANDLE = null_mut();
+    let cur_proc = unsafe { PsGetCurrentProcess() };
+    if cur_proc.is_null() {
+        println!("[sanctum] [-] Current process was null in apc_callback_inject_sanctum");
+        return;
+    }
+    let status = unsafe {
+        ObOpenObjectByPointer(
+            cur_proc as *mut _,
+            OBJ_KERNEL_HANDLE,
+            null_mut(),
+            STANDARD_RIGHTS_ALL,
+            null_mut(),
+            KernelMode as _,
+            &mut process_handle,
+        )
     };
 
-    loop {
-        // todo I'd rather use a KEVENT than a loop - just need to think about the memory model for it.
-        // Tried implementing this now, but as im at POC phase it required quite a bit of a refactor, so i'll do this in the
-        // future more likely. Leaving the todo in to work on this later :)
-        // The least we can do is make the threat alertable so we aren't starving too many resources.
-        let _ =
-            unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
-
-        if !ImageLoadQueueForInjector::pid_in_waitlist(pid as usize) {
-            break;
-        }
+    if !nt_success(status) || process_handle.is_null() {
+        println!(
+            "[sanctum] [-] Error calling ObOpenObjectByPointer in dll injection callback: {status:#X}, handle: {process_handle:?}."
+        );
+        return;
     }
+
+    let path: Vec<u16> = r"\??\C:\Users\flux\AppData\Roaming\Sanctum\sanctum.dll"
+        .encode_utf16()
+        .chain(once(0))
+        .collect();
+    let mut path_unicode = UNICODE_STRING::default();
+    unsafe {
+        RtlInitUnicodeString(&mut path_unicode, path.as_ptr());
+    }
+    let mut file: HANDLE = null_mut();
+    let mut dll_path_oa = OBJECT_ATTRIBUTES::default();
+    let _ = unsafe {
+        InitializeObjectAttributes(
+            &mut dll_path_oa,
+            &mut path_unicode,
+            OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+            null_mut(),
+            null_mut(),
+        )
+    };
+
+    let mut iosb = IO_STATUS_BLOCK::default();
+
+    let status = unsafe {
+        ZwOpenFile(
+            &mut file,
+            FILE_READ_DATA | FILE_EXECUTE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &mut dll_path_oa,
+            &mut iosb,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+        )
+    };
+    if !nt_success(status) {
+        let _ = unsafe { ZwClose(process_handle) };
+        println!("[sanctum] [-] FAILED to open sanctum DLL. Code: {status:#X}");
+        return;
+    }
+
+    // Create new section for DLL mapping
+    let mut oa = OBJECT_ATTRIBUTES::default();
+    let _ = unsafe {
+        InitializeObjectAttributes(
+            &mut oa,
+            null_mut(),
+            OBJ_KERNEL_HANDLE,
+            null_mut(),
+            null_mut(),
+        )
+    };
+
+    let mut dll_section_handle: HANDLE = null_mut();
+
+    let status = unsafe {
+        ZwCreateSection(
+            &mut dll_section_handle,
+            SECTION_MAP_WRITE | SECTION_MAP_EXECUTE | SECTION_MAP_READ,
+            &mut oa,
+            null_mut(),
+            PAGE_EXECUTE_READ,
+            SEC_IMAGE,
+            file,
+        )
+    };
+    if !nt_success(status) {
+        let _ = unsafe { ZwClose(process_handle) };
+        println!("[sanctum] [-] Failed to create section. {status:#X}");
+        return;
+    }
+
+    // Map the DLL on the section
+    let mut dll_base: *mut c_void = null_mut();
+    let mut view_size: u64 = 0;
+    let status = unsafe {
+        ZwMapViewOfSection(
+            dll_section_handle,
+            process_handle,
+            &mut dll_base,
+            0,
+            0,
+            null_mut(),
+            &mut view_size,
+            ViewUnmap,
+            0,
+            PAGE_EXECUTE_READ,
+        )
+    };
+
+    if !nt_success(status) {
+        let _ = unsafe { ZwClose(process_handle) };
+        let _ = unsafe { ZwClose(dll_section_handle) };
+        println!("[sanctum] [-] Failed ZwMapViewOfSection. {status:#X}");
+        return;
+    }
+
+    println!("Mapped DLL at base: {dll_base:p}, sz: {view_size}");
+}
+
+fn write_dl_path() -> Option<*mut c_void> {
+    let mut base: *mut c_void = null_mut();
+    let path: Vec<u16> = r"C:\Users\flux\AppData\Roaming\Sanctum\sanctum.dll"
+        .encode_utf16()
+        .chain(once(0))
+        .collect();
+
+    let path_len = path.len() as u64 * 2;
+    let mut sz: u64 = path_len;
+
+    let status = unsafe {
+        ZwAllocateVirtualMemory(
+            (-1isize) as HANDLE,
+            &mut base,
+            0,
+            &mut sz,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
+
+    if !nt_success(status) {
+        println!("[sanctum] [-] Failed to allocate VM for DLL path. Status: {status:#X}");
+        return None;
+    }
+
+    unsafe { RtlCopyMemoryNonTemporal(base, path.as_ptr() as *const c_void, path_len) };
+
+    Some(base)
 }

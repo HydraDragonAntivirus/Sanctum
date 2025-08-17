@@ -9,7 +9,7 @@ use wdk_sys::{
 };
 
 use crate::{
-    alt_syscalls::{AltSyscallStatus, AltSyscalls, g_alt_syscalls_enabled},
+    alt_syscalls::{AltSyscallStatus, AltSyscalls},
     utils::thread_to_process_name,
 };
 
@@ -37,12 +37,10 @@ pub unsafe extern "C" fn thread_callback(
     thread_id: *mut c_void,
     create: BOOLEAN,
 ) {
-    let pid = pid as u32;
-    let thread_id_u32 = thread_id as u32;
+    let _pid = pid as u32;
+    let _thread_id_u32 = thread_id as u32;
 
-    if g_alt_syscalls_enabled.load(Ordering::SeqCst) {
-        thread_reg_alt_callbacks(thread_id);
-    }
+    // thread_reg_alt_callbacks(thread_id);
 }
 
 pub fn thread_reg_alt_callbacks(thread_id: *mut c_void) {
@@ -66,7 +64,7 @@ pub fn thread_reg_alt_callbacks(thread_id: *mut c_void) {
     };
 
     AltSyscalls::configure_thread_for_alt_syscalls(ke_thread as *mut _, AltSyscallStatus::Enable);
-    AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
+    // AltSyscalls::configure_process_for_alt_syscalls(ke_thread as *mut _);
 
     unsafe { ObfDereferenceObject(ke_thread as *mut _) };
 }
