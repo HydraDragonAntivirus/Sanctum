@@ -138,9 +138,18 @@ fn initialise_sanctum(driver: &mut DRIVER_OBJECT) -> Result<(), i32> {
         return Err(STATUS_UNSUCCESSFUL);
     }
 
+    ProcessMonitor::start_process_monitor_worker();
+
     if let Err(e) = SyscallPostProcessor::spawn() {
         println!("[sanctum] [-] Error starting SyscallPostProcessor. {:?}", e);
         return Err(STATUS_UNSUCCESSFUL);
+    }
+
+    let status = register_image_load_callback();
+    if !nt_success(status) {
+        println!("[sanctum] [-] Could not start PsSetLoadImageNotifyRoutine. Status: {status}");
+        driver_exit(driver); // cleanup any resources before returning
+        return Err(status);
     }
 
     // Registry callbacks
@@ -152,18 +161,7 @@ fn initialise_sanctum(driver: &mut DRIVER_OBJECT) -> Result<(), i32> {
     // Thread interception
     set_thread_creation_callback();
 
-    ProcessMonitor::start_process_monitor_worker();
-
-    // todo this is just a ret after the callback is registered...
-    let status = register_image_load_callback();
-    if !nt_success(status) {
-        println!("[sanctum] [-] Could not start PsSetLoadImageNotifyRoutine. Status: {status}");
-        driver_exit(driver); // cleanup any resources before returning
-        return Err(status);
-    }
-
     // Intercepting process creation
-    // todo this is a mess
     let res =
         unsafe { PsSetCreateProcessNotifyRoutineEx(Some(process_create_callback), FALSE as u8) };
     if res != STATUS_SUCCESS {
