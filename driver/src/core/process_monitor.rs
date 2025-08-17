@@ -68,7 +68,7 @@ pub static MONITORED_FN_PTRS: AtomicPtr<MonitoredApis> = AtomicPtr::new(null_mut
 pub struct MonitoredApis {
     /// A BTreeMap containing the function's virtual address as a usize,
     /// and a tuple of (dll name, and the API as a [`SensitiveAPI`])
-    inner: BTreeMap<usize, (String, SensitiveAPI)>,
+    pub inner: BTreeMap<usize, (String, SensitiveAPI)>,
 }
 
 mod process {
@@ -210,7 +210,7 @@ pub struct LoadedModules {
     inner: BTreeMap<String, LoadedModule>,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SensitiveAPI {
     LdrLoadDll,
     LoadLibraryA,
@@ -499,10 +499,7 @@ impl ProcessMonitor {
                 let time_delta = unsafe { current_time.QuadPart - t.timer_start.QuadPart };
                 time_delta > unsafe { max_time_allowed.QuadPart }
             }) {
-                println!(
-                    "Dealing with bad timer... and it should have extracted? {:?}",
-                    timer
-                );
+                println!("GH timer expired. {timer:?}");
                 processes_to_terminate.push((process.pid, timer.clone()));
             }
         }
