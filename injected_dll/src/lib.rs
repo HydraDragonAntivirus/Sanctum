@@ -21,7 +21,9 @@ use windows::{
     core::PCSTR,
 };
 
-use crate::stubs::{nt_create_thread_ex_intercept, nt_open_process, nt_write_virtual_memory, virtual_alloc_ex};
+use crate::stubs::{
+    nt_create_thread_ex_intercept, nt_open_process, nt_write_virtual_memory, virtual_alloc_ex,
+};
 
 mod integrity;
 mod ipc;
@@ -101,16 +103,18 @@ impl<'a> StubAddresses<'a> {
             Err(_) => todo!(),
         };
 
-        let x = format!("Injecting Sanctum DLL\0");
-        unsafe {
-            MessageBoxA(
-                None,
-                PCSTR::from_raw(x.as_ptr() as *mut _),
-                PCSTR::from_raw(x.as_ptr() as *mut _),
-                MB_OK,
-            )
-        };
-
+        #[cfg(debug_assertions)]
+        {
+            let x = format!("Injecting Sanctum DLL\0");
+            unsafe {
+                MessageBoxA(
+                    None,
+                    PCSTR::from_raw(x.as_ptr() as *mut _),
+                    PCSTR::from_raw(x.as_ptr() as *mut _),
+                    MB_OK,
+                )
+            };
+        }
 
         //
         // Get function pointers to the functions we wish to hook
@@ -227,11 +231,11 @@ impl<'a> StubAddresses<'a> {
             },
         );
         hm.insert(
-            "NtCreateThreadEx", 
-            Addresses { 
+            "NtCreateThreadEx",
+            Addresses {
                 edr: nt_create_thread_ex_intercept as usize,
                 ntdll: ntctx,
-            }
+            },
         );
 
         // Prefix this with ZZZ to make sure it is to be the very last item. We need to make sure this is processed
