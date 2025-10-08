@@ -3,11 +3,11 @@ use core::{ffi::c_void, ptr::null_mut};
 use wdk::{nt_success, println};
 use wdk_sys::{
     CLIENT_ID, NTSTATUS, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES, PASSIVE_LEVEL, PROCESS_ALL_ACCESS,
-    STATUS_UNSUCCESSFUL,
+    STATUS_PROCESS_IS_TERMINATING, STATUS_UNSUCCESSFUL,
     ntddk::{KeGetCurrentIrql, ZwOpenProcess, ZwTerminateProcess},
 };
 
-use crate::ffi::InitializeObjectAttributes;
+use crate::{ffi::InitializeObjectAttributes, utils::get_process_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverMode {
@@ -23,7 +23,7 @@ pub struct Containment {}
 
 impl Containment {
     pub fn contain_process(pid: u32) {
-        println!("[sanctum] [i] Containing process: {pid}");
+        println!("[sanctum] [i] Containing process: {pid}",);
         // todo actual containment
 
         let _ = terminate_process(pid);
@@ -66,7 +66,7 @@ fn terminate_process(pid: u32) -> NTSTATUS {
 
     let status = unsafe { ZwTerminateProcess(handle, 1) };
 
-    if !nt_success(status) {
+    if !nt_success(status) && status != STATUS_PROCESS_IS_TERMINATING {
         println!("[sanctum] [-] Error terminating process. Error code: {status:#X}");
     }
 

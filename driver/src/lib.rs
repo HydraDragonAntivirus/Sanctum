@@ -42,10 +42,10 @@ use ffi::IoGetCurrentIrpStackLocation;
 use shared_no_std::{
     constants::{DOS_DEVICE_NAME, NT_DEVICE_NAME, VERSION_DRIVER},
     ioctl::{
-        SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS,
-        SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN,
-        SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT,
-        SANC_IOCTL_SEND_BASE_ADDRS,
+        SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_INJECT_FAILED, SANC_IOCTL_DLL_SYSCALL,
+        SANC_IOCTL_DRIVER_GET_IMAGE_LOADS, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN,
+        SANC_IOCTL_DRIVER_GET_MESSAGE_LEN, SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING,
+        SANC_IOCTL_PING_WITH_STRUCT, SANC_IOCTL_SEND_BASE_ADDRS,
     },
 };
 use utils::{Log, LogLevel};
@@ -75,7 +75,10 @@ mod utils;
 
 use wdk_alloc::WdkAllocator;
 
-use crate::core::process_monitor::{MONITORED_FN_PTRS, set_monitored_dll_fn_ptrs};
+use crate::{
+    core::process_monitor::{MONITORED_FN_PTRS, set_monitored_dll_fn_ptrs},
+    device_comms::ioctl_failed_to_inject_dll,
+};
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
@@ -493,6 +496,13 @@ unsafe extern "C" fn handle_ioctl(_device: *mut DEVICE_OBJECT, pirp: PIRP) -> NT
         }
         SANC_IOCTL_SEND_BASE_ADDRS => {
             set_monitored_dll_fn_ptrs(p_stack_location, pirp);
+            STATUS_SUCCESS
+        }
+        SANC_IOCTL_DLL_INJECT_FAILED => {
+            if let Err(e) = ioctl_failed_to_inject_dll(p_stack_location, pirp) {
+                return e;
+            }
+
             STATUS_SUCCESS
         }
 

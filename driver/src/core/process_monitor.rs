@@ -59,7 +59,10 @@ use crate::{
     device_comms::IoctlBuffer,
     ffi::{InitializeObjectAttributes, NtQueryInformationProcess},
     response::{ReportEventType, ReportInfo, contain_and_report},
-    utils::{DriverError, eprocess_to_process_name, scan_usermode_module_for_function_address},
+    utils::{
+        DriverError, eprocess_to_process_name, get_process_name,
+        scan_usermode_module_for_function_address,
+    },
 };
 
 pub static MONITORED_FN_PTRS: AtomicPtr<MonitoredApis> = AtomicPtr::new(null_mut());
@@ -499,7 +502,10 @@ impl ProcessMonitor {
                 let time_delta = unsafe { current_time.QuadPart - t.timer_start.QuadPart };
                 time_delta > unsafe { max_time_allowed.QuadPart }
             }) {
-                println!("GH timer expired. {timer:?}");
+                println!(
+                    "GH timer expired. [{} {}], {timer:?}",
+                    process.pid, process.process_image
+                );
                 processes_to_terminate.push((process.pid, timer.clone()));
             }
         }

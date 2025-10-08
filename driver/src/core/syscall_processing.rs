@@ -31,7 +31,7 @@ use crate::{
         SSN_NT_WRITE_VM,
     },
     core::process_monitor::ProcessMonitor,
-    utils::{DriverError, duration_to_large_int, handle_to_pid},
+    utils::{DriverError, duration_to_large_int, get_process_name, handle_to_pid},
 };
 
 /// Whether to allow the syscall to dispatch by the dispatcher
@@ -253,6 +253,8 @@ impl KernelSyscallIntercept {
         if remote_pid == current_pid {
             return (None, AllowSyscall::Yes);
         }
+
+        println!("in p, remote: {remote_pid}, cur: {current_pid}");
 
         let access_mask = ktrap_frame.Rdx as u32;
 

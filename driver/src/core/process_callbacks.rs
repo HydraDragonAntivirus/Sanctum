@@ -7,6 +7,7 @@ use core::{
     iter::once,
     ptr::{null_mut, slice_from_raw_parts},
     sync::atomic::Ordering,
+    time::Duration,
 };
 use shared_no_std::driver_ipc::{HandleObtained, ProcessStarted};
 use wdk::{nt_success, println};
@@ -23,25 +24,26 @@ use wdk_sys::{
     OB_PREOP_CALLBACK_STATUS, OBJ_CASE_INSENSITIVE, OBJ_KERNEL_HANDLE, OBJECT_ATTRIBUTES,
     PAGE_EXECUTE_READ, PAGE_READWRITE, PEPROCESS, PKTHREAD, PRKAPC, PROCESS_ALL_ACCESS,
     PS_CREATE_NOTIFY_INFO, PVOID, PsProcessType, SEC_IMAGE, SECTION_MAP_EXECUTE, SECTION_MAP_READ,
-    SECTION_MAP_WRITE, STANDARD_RIGHTS_ALL, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, SYNCHRONIZE,
+    SECTION_MAP_WRITE, STANDARD_RIGHTS_ALL, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, SYNCHRONIZE, TRUE,
     UNICODE_STRING,
     ntddk::{
-        KeGetCurrentIrql, ObOpenObjectByPointer, ObRegisterCallbacks, PsGetCurrentProcessId,
-        PsGetProcessId, PsRemoveLoadImageNotifyRoutine, PsSetLoadImageNotifyRoutine,
-        RtlCopyMemoryNonTemporal, RtlInitUnicodeString, ZwAllocateVirtualMemory, ZwClose,
-        ZwCreateSection, ZwMapViewOfSection, ZwOpenFile,
+        KeDelayExecutionThread, KeGetCurrentIrql, ObOpenObjectByPointer, ObRegisterCallbacks,
+        PsGetCurrentProcessId, PsGetProcessId, PsRemoveLoadImageNotifyRoutine,
+        PsSetLoadImageNotifyRoutine, RtlCopyMemoryNonTemporal, RtlInitUnicodeString,
+        ZwAllocateVirtualMemory, ZwClose, ZwCreateSection, ZwMapViewOfSection, ZwOpenFile,
     },
 };
 
 use crate::{
     DRIVER_MESSAGES, REGISTRATION_HANDLE,
+    alt_syscalls::AltSyscalls,
     core::process_monitor::{LoadedModule, MONITORED_FN_PTRS, ProcessMonitor, SensitiveAPI},
     device_comms::ImageLoadQueueForInjector,
     ffi::{
         InitializeObjectAttributes, KeInitializeApc, KeInsertQueueApc, PKNORMAL_ROUTINE,
         PsGetCurrentProcess,
     },
-    utils::{get_process_name, unicode_to_string},
+    utils::{duration_to_large_int, get_process_name, unicode_to_string},
 };
 
 /// Callback function for a new process being created on the system.
@@ -341,9 +343,9 @@ extern "C" fn image_load_callback(
             "******************* SANCTUM DLL INJECTED, proc: {}",
             get_process_name()
         );
-        // if ImageLoadQueueForInjector::remove_pid_from_injection_waitlist(pid as usize).is_err() {
-        //     // todo handle threat detection here
-        // }
+        if ImageLoadQueueForInjector::remove_pid_from_injection_waitlist(pid as usize).is_err() {
+            // todo handle threat detection here
+        }
 
         // Track in ProcessMonitor
         let lm = LoadedModule::new(image_info.ImageBase as _, image_info.ImageSize as _);
@@ -351,50 +353,68 @@ extern "C" fn image_load_callback(
 
         // We can now enable alt syscalls on this process as the DLL is loaded so techniques like Ghost Hunting etc shouldn't
         // cause issues.
+        let mut k_thread: *const c_void = null_mut();
+        unsafe {
+            asm!(
+                "mov {}, gs:[0x188]",
+                out(reg) k_thread,
+            );
+        }
+        AltSyscalls::configure_process_for_alt_syscalls(k_thread as *mut _);
         return;
     }
 
-    let mut k_thread: *const c_void = null_mut();
-    unsafe {
-        asm!(
-            "mov {}, gs:[0x188]",
-            out(reg) k_thread,
-        );
-    }
-
-    if k_thread.is_null() {
-        println!("[-] [Sanctum] No KTHREAD discovered.");
+    if !name.ends_with(".exe") {
         return;
     }
 
-    println!("Doing the thing, img name: {name}");
-    if let Some(path_addr) = write_dl_path() {
-        register_apc_for_sanctum_dll_load(k_thread as *mut _, path_addr);
-    }
+    // let mut k_thread: *const c_void = null_mut();
+    // unsafe {
+    //     asm!(
+    //         "mov {}, gs:[0x188]",
+    //         out(reg) k_thread,
+    //     );
+    // }
+
+    // if k_thread.is_null() {
+    //     println!("[-] [Sanctum] No KTHREAD discovered.");
+    //     return;
+    // }
+
+    // println!("Doing the thing, img name: {name}");
+    // if let Some(path_addr) = write_dl_path() {
+    //     register_apc_for_sanctum_dll_load(k_thread as *mut _, path_addr);
+    // }
 
     // For now, only inject into these processes whilst we test
     // if !name.contains("malware.exe") {
     //     return;
     // }
 
-    // ImageLoadQueueForInjector::queue_process_for_usermode(pid as usize);
+    ImageLoadQueueForInjector::queue_process_for_usermode(pid as usize);
 
-    // let mut thread_sleep_time = duration_to_large_int(Duration::from_secs(1));
+    let mut thread_sleep_time = duration_to_large_int(Duration::from_secs(1));
 
-    // loop {
-    //     // todo I'd rather use a KEVENT than a loop - just need to think about the memory model for it.
-    //     // Tried implementing this now, but as im at POC phase it required quite a bit of a refactor, so i'll do this in the
-    //     // future more likely. Leaving the todo in to work on this later :)
-    //     // The least we can do is make the threat alertable so we aren't starving too many resources.
-    //     let _ =
-    //         unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
+    loop {
+        // todo I'd rather use a KEVENT than a loop - just need to think about the memory model for it.
+        // Tried implementing this now, but as im at POC phase it required quite a bit of a refactor, so i'll do this in the
+        // future more likely. Leaving the todo in to work on this later :)
+        // The least we can do is make the threat alertable so we aren't starving too many resources.
+        let _ =
+            unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
 
-    //     if !ImageLoadQueueForInjector::pid_in_waitlist(pid as usize) {
-    //         break;
-    //     }
+        if !ImageLoadQueueForInjector::pid_in_waitlist(pid as usize) {
+            break;
+        }
 
-    //     println!("In loop for: {}", get_process_name());
-    // }
+        println!("In loop for: {}. PID: {}", get_process_name(), unsafe {
+            PsGetCurrentProcessId() as u32
+        });
+
+        if name.to_ascii_lowercase().contains("backgroundtask") {
+            break;
+        }
+    }
 }
 
 fn register_apc_for_sanctum_dll_load(thread: PKTHREAD, dll_allocation_addr: *mut c_void) {

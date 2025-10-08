@@ -9,11 +9,18 @@ use shared_no_std::{
     driver_ipc::ImageLoadQueues,
     ghost_hunting::Syscall,
     ioctl::{
-        BaseAddressesOfMonitoredDlls, DriverMessages, SancIoctlPing, SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT, SANC_IOCTL_SEND_BASE_ADDRS
+        BaseAddressesOfMonitoredDlls, DriverMessages, SANC_IOCTL_CHECK_COMPATIBILITY,
+        SANC_IOCTL_DLL_INJECT_FAILED, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS,
+        SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN,
+        SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT,
+        SANC_IOCTL_SEND_BASE_ADDRS, SancIoctlPing,
     },
 };
 use std::{ffi::c_void, slice::from_raw_parts};
-use windows::{core::w, Win32::System::{LibraryLoader::GetModuleHandleW, IO::DeviceIoControl}};
+use windows::{
+    Win32::System::{IO::DeviceIoControl, LibraryLoader::GetModuleHandleW},
+    core::w,
+};
 
 impl SanctumDriverManager {
     /// Checks the driver compatibility between the driver and user mode applications.
@@ -99,8 +106,12 @@ impl SanctumDriverManager {
             }
         }
 
-        let k32_base = unsafe { GetModuleHandleW(w!("Kernel32.dll")) }.expect("Could not get k32 handle").0 as usize;
-        let ntdll_base = unsafe { GetModuleHandleW(w!("ntdll.dll")) }.expect("Could not get ntdll handle").0 as usize;
+        let k32_base = unsafe { GetModuleHandleW(w!("Kernel32.dll")) }
+            .expect("Could not get k32 handle")
+            .0 as usize;
+        let ntdll_base = unsafe { GetModuleHandleW(w!("ntdll.dll")) }
+            .expect("Could not get ntdll handle")
+            .0 as usize;
 
         let data = BaseAddressesOfMonitoredDlls {
             kernel32: k32_base,
@@ -498,6 +509,40 @@ impl SanctumDriverManager {
             )
         } {
             println!("[-] Failed to send IOCTL for DLL syscall event. {:?}", e);
+        }
+    }
+
+    pub fn ioctl_dll_inject_failed(&mut self, pid: u32) {
+        //
+        // Check the handle to the driver is valid, if not, attempt to initialise it.
+        //
+
+        // todo improve how the error handling happens..
+        if self.handle_via_path.handle.is_none() {
+            // try 1 more time
+            self.init_handle_via_registry();
+            if self.handle_via_path.handle.is_none() {
+                println!("[-] Error getting driver handle to send syscall ioctl from dll");
+                return;
+            }
+        }
+
+        let message = serde_json::to_vec(&pid).expect("could not serialise Syscall to vector");
+
+        // attempt the call
+        if let Err(e) = unsafe {
+            DeviceIoControl(
+                self.handle_via_path.handle.unwrap(),
+                SANC_IOCTL_DLL_INJECT_FAILED,
+                Some(message.as_ptr() as *const _),
+                message.len() as u32,
+                None,
+                0,
+                None,
+                None,
+            )
+        } {
+            println!("[-] Failed to send IOCTL. {:?}", e);
         }
     }
 }
