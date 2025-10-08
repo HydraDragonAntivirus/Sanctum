@@ -37,7 +37,10 @@ use wdk_sys::{
 use crate::{
     DRIVER_MESSAGES, REGISTRATION_HANDLE,
     alt_syscalls::AltSyscalls,
-    core::process_monitor::{LoadedModule, MONITORED_FN_PTRS, ProcessMonitor, SensitiveAPI},
+    core::{
+        injection::inject_dll,
+        process_monitor::{LoadedModule, MONITORED_FN_PTRS, ProcessMonitor, SensitiveAPI},
+    },
     device_comms::ImageLoadQueueForInjector,
     ffi::{
         InitializeObjectAttributes, KeInitializeApc, KeInsertQueueApc, PKNORMAL_ROUTINE,
@@ -299,6 +302,13 @@ extern "C" fn image_load_callback(
 
     let name_slice = slice_from_raw_parts(image_name.Buffer, (image_name.Length / 2) as usize);
     let name = String::from_utf16_lossy(unsafe { &*name_slice }).to_lowercase();
+
+    if name.contains("notepad.exe") {
+        inject_dll();
+    }
+
+    // todo new way of working should have all the below removed..?
+    return;
 
     // In the event it is a DLL load, we want to grab & track its mappings
     if name.contains(".dll") && !name.contains("sanctum.dll") {

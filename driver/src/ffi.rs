@@ -7,7 +7,7 @@ use wdk_sys::{
     ACCESS_MASK, BOOLEAN, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR,
     KPRIORITY, KPROCESSOR_MODE, LIST_ENTRY, NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE,
     PIO_STACK_LOCATION, PIRP, PKAPC, PKTHREAD, POBJECT_ATTRIBUTES, PRKAPC, PROCESSINFOCLASS,
-    PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, PVOID, SIZE_T, ULONG,
+    PSECURITY_DESCRIPTOR, PSIZE_T, PULONG, PUNICODE_STRING, PVOID, SIZE_T, ULONG,
     ntddk::{KeGetCurrentIrql, KeInitializeEvent},
 };
 
@@ -109,6 +109,14 @@ unsafe extern "system" {
     ) -> BOOLEAN;
 
     pub unsafe fn PsGetCurrentProcess() -> *const c_void;
+
+    pub fn ZwProtectVirtualMemory(
+        ProcessHandle: HANDLE,
+        BaseAddress: *mut PVOID,
+        RegionSize: PSIZE_T,
+        NewProtect: ULONG,
+        OldProtect: PULONG,
+    ) -> NTSTATUS;
 }
 
 pub type PKNORMAL_ROUTINE = unsafe extern "C" fn(PVOID, PVOID, PVOID);
