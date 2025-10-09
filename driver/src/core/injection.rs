@@ -1,6 +1,7 @@
 use core::{arch::asm, ffi::c_void, iter::once, ptr::null_mut, sync::atomic::Ordering};
 
 use alloc::vec::Vec;
+use anyhow::{Result, bail};
 use wdk::{nt_success, println};
 use wdk_sys::{
     HANDLE, MEM_COMMIT, PAGE_EXECUTE_READ, PAGE_READWRITE, UNICODE_STRING,
@@ -23,12 +24,35 @@ const SANCTUM_HOOK_DLL_PATH: &str = r"\??\C:\Users\flux\AppData\Roaming\Sanctum\
 ///
 /// Methodology graciously provided by https://github.com/eversinc33, including the bootstrapping shellcode and using
 /// LdrLoadDll to make this work, I was having trouble with some instability and he donated his methodology :) thank you!
-pub fn inject_dll() {
+pub fn inject_dll() -> Result<()> {
     let pid = unsafe { PsGetCurrentProcessId() } as u32;
     let img_name = get_process_name();
 
     println!("[sanctum] [i] Injecting into process {img_name}, pid: {pid}",);
+    let shellcode_va = write_shellcode_in_process_for_injection()?;
 
+    Ok(())
+}
+
+fn generate_unicode_path_for_dll() -> UNICODE_STRING {
+    let path: Vec<u16> = SANCTUM_HOOK_DLL_PATH
+        .encode_utf16()
+        .chain(once(0))
+        .collect();
+
+    let mut us = UNICODE_STRING::default();
+
+    unsafe { RtlInitUnicodeString(&mut us, path.as_ptr()) };
+
+    us
+}
+
+/// Write shellcode into the **current** process for which this is called. The shellcode written causes
+/// LdrLoadDll to load the Sanctum DLL into the target process.
+///
+/// # Returns
+/// The virtual address within the target process of where the shellcode was written, or an error.
+fn write_shellcode_in_process_for_injection() -> Result<*const c_void> {
     let dll_path_to_inject = generate_unicode_path_for_dll();
 
     //
@@ -72,10 +96,7 @@ pub fn inject_dll() {
     };
 
     if !nt_success(status) {
-        println!(
-            "[sanctum] [-] DLL injection failed on ZwAllocateVirtualMemory with status: {status:#X}"
-        );
-        return;
+        bail!("DLL injection failed on ZwAllocateVirtualMemory with status: {status:#X}");
     }
 
     let status = unsafe {
@@ -90,10 +111,7 @@ pub fn inject_dll() {
     };
 
     if !nt_success(status) {
-        println!(
-            "[sanctum] [-] DLL injection failed on ZwAllocateVirtualMemory 2 with status: {status:#X}"
-        );
-        return;
+        bail!("DLL injection failed on ZwAllocateVirtualMemory 2 with status: {status:#X}");
     }
 
     //
@@ -131,8 +149,7 @@ pub fn inject_dll() {
     };
 
     if ldr_ld_dll_addr == 0 {
-        println!("[sanctum] [-] Failed to get address of LdrLoadDll whilst trying DLL injection.");
-        return;
+        bail!("Failed to get address of LdrLoadDll whilst trying DLL injection.")
     }
 
     //
@@ -194,28 +211,12 @@ pub fn inject_dll() {
         );
 
         if !nt_success(status) {
-            println!(
-                "[sanctum] [-] Failed to mark shellcode memory as executable. Status: {status:#X}"
-            );
+            println!("Failed to mark shellcode memory as executable. Status: {status:#X}");
             // todo free memory
         }
 
-        println!(
-            "[sanctum] [+] All allocations succeeded. Shellcode at: {:p}",
-            remote_shellcode_memory
-        );
+        println!("All allocations succeeded. Shellcode at: {remote_shellcode_memory:p}",);
     }
-}
 
-fn generate_unicode_path_for_dll() -> UNICODE_STRING {
-    let path: Vec<u16> = SANCTUM_HOOK_DLL_PATH
-        .encode_utf16()
-        .chain(once(0))
-        .collect();
-
-    let mut us = UNICODE_STRING::default();
-
-    unsafe { RtlInitUnicodeString(&mut us, path.as_ptr()) };
-
-    us
+    Ok(remote_shellcode_memory)
 }

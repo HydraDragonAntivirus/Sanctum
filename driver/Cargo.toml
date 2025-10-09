@@ -32,6 +32,7 @@ serde_json = {version = "1.0", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"]}
 wdk-mutex = "1.1.0"
 strum = { version = "0.27", default-features = false, features = ["derive"] }
+anyhow = { version = "1.0", default-features = false }
 # wdk-mutex = {version = "1.1.0", path = "../../wdk_mutex"}
 
 [profile.dev]
