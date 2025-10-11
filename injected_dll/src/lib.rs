@@ -1,4 +1,5 @@
 use integrity::start_ntdll_integrity_monitor;
+use shared_no_std::ghost_hunting::DLLMessage;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::mem;
@@ -21,6 +22,7 @@ use windows::{
     core::PCSTR,
 };
 
+use crate::ipc::send_ipc_to_engine;
 use crate::stubs::{
     nt_create_thread_ex_intercept, nt_open_process, nt_write_virtual_memory, virtual_alloc_ex,
 };
@@ -74,6 +76,8 @@ unsafe extern "system" fn initialise_injected_dll(_: *mut c_void) -> u32 {
 
     // this must be called after the patching and BEFORE the resumption of all threads
     start_ntdll_integrity_monitor();
+
+    ioctl_initialised();
 
     resume_all_threads(suspended_handles);
 
@@ -429,3 +433,8 @@ pub static SYSCALL_NUMBER: LazyLock<BTreeMap<&'static str, u32>> = LazyLock::new
 
     syscall_num_repo
 });
+
+/// Send an IOCTL to the driver which informs it the process is ready for ghost hunting
+fn ioctl_initialised() {
+    send_ipc_to_engine(DLLMessage::ProcessReadyForGhostHunting);
+}

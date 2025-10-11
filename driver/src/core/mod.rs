@@ -1,4 +1,5 @@
 pub mod etw_mon;
+pub mod injection;
 pub mod process_callbacks;
 pub mod process_monitor;
 pub mod registry;

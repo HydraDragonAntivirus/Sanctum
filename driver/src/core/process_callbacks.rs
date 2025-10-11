@@ -8,13 +8,13 @@ use core::{
     sync::atomic::Ordering,
     time::Duration,
 };
-use shared_no_std::driver_ipc::{HandleObtained, ProcessStarted, ProcessTerminated};
+use shared_no_std::driver_ipc::{HandleObtained, ProcessStarted};
 use wdk::println;
 use wdk_sys::{
     _IMAGE_INFO,
     _MODE::KernelMode,
     _OB_PREOP_CALLBACK_STATUS::OB_PREOP_SUCCESS,
-    _UNICODE_STRING, APC_LEVEL, HANDLE, LARGE_INTEGER, NTSTATUS, OB_CALLBACK_REGISTRATION,
+    _UNICODE_STRING, APC_LEVEL, HANDLE, NTSTATUS, OB_CALLBACK_REGISTRATION,
     OB_FLT_REGISTRATION_VERSION, OB_OPERATION_HANDLE_CREATE, OB_OPERATION_HANDLE_DUPLICATE,
     OB_OPERATION_REGISTRATION, OB_PRE_OPERATION_INFORMATION, OB_PREOP_CALLBACK_STATUS, PEPROCESS,
     PROCESS_ALL_ACCESS, PS_CREATE_NOTIFY_INFO, PsProcessType, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
@@ -28,9 +28,12 @@ use wdk_sys::{
 
 use crate::{
     DRIVER_MESSAGES, REGISTRATION_HANDLE,
-    core::process_monitor::{LoadedModule, ProcessMonitor},
+    core::{
+        injection::inject_dll,
+        process_monitor::{LoadedModule, ProcessMonitor},
+    },
     device_comms::ImageLoadQueueForInjector,
-    utils::unicode_to_string,
+    utils::{duration_to_large_int, get_process_name, unicode_to_string},
 };
 
 /// Callback function for a new process being created on the system.
@@ -281,14 +284,22 @@ extern "C" fn image_load_callback(
     }
 
     // SAFETY: Pointers validated above
-    let image_name = unsafe { *image_name };
     let image_info = unsafe { *image_info };
+    let image_name_string = get_image_name(image_name);
+    let process_name = get_process_name();
+    let pid = pid as u32;
 
-    let name_slice = slice_from_raw_parts(image_name.Buffer, (image_name.Length / 2) as usize);
-    let name = String::from_utf16_lossy(unsafe { &*name_slice }).to_lowercase();
+    // Gate-keep what processes we are monitoring
+    if !(process_name.contains("otepad.e") || process_name.contains("alware.e")) {
+        return;
+    }
+
+    if image_name_string.contains("kernel32.dll") {
+        let _ = inject_dll();
+    }
 
     // In the event it is a DLL load, we want to grab & track its mappings
-    if name.contains(".dll") && !name.contains("sanctum.dll") {
+    if image_name_string.contains(".dll") {
         // todo hash check on the sanctum DLL to make sure an adversary isn't calling their malicious DLL `sanctum.dll`
         // which would interfere with what we are doing in this segment.
 
@@ -296,64 +307,62 @@ extern "C" fn image_load_callback(
         // on it.
 
         let lm = LoadedModule::new(image_info.ImageBase as _, image_info.ImageSize as _);
-
-        ProcessMonitor::add_loaded_module(lm, &name, pid as u32);
+        ProcessMonitor::add_loaded_module(lm, &image_name_string, pid);
 
         return;
     }
 
-    // Now we are into the 'meat' of the callback routine. To see why we are doing what we are doing here,
-    // please refer to the function definition. In a nutshell, queue the process creation, the usermode engine
-    // will poll the driver for new processes; the driver will wait for notification our DLL is injected.
     //
-    // We can get around waiting on an IOCTL to come back from usermode by seeing when "sanctum.dll" is mapped into
-    // the PID. This presents one potential 'vulnerability' in that a malicious process could attempt to inject a DLL
-    // named "sanctum.dll" into our process; we can get around this by maintaining a second Grt mutex which contains
-    // the PIDs that are pending the sanctum dll being injected. In the event the PID has been removed (aka we have a
-    // sanctum.dll injected in) we know either foul play is detected (a TA is trying to exploit this vulnerability in the
-    // implementation), or a unforeseen sanctum related error has occurred.
+    // We force the sanctum DLL to load before kernel32 is loaded, therefore we need to block at kernelbase.
+    // We cannot block at kernel32 as we need the thread to continue with its execution in order to have the Sanctum
+    // loaded in.
     //
-    // **NOTE**: Handling the draining of the `ImageLoadQueueForInjector` and adding the pid to the pending `Grt` is handled
-    // in the `driver_communication` module - we dont need to worry about that implementation here, it will happen here
-    // as if 'by magic'. See the implementation there for more details.
+    // The thread loading kernelbase will loop until the sanctum DLL has notified the driver it has loaded and the
+    // relocations have taken place.
     //
-    // In either case; we can freeze the process and alert the user to possible malware / dump the process / kill the process
-    // etc.
-    //
-    // Depending on performance; we could also fast hash the "sanctum.dll"  bytes to see whether it matches the expected DLL -
-    // this *may* be more performant than accessing the Grt, but for now, this works.
-    //
-    // todo would be nice to make an API for this as we will likely want to use this in various other places in the EDR.
+    block_until_sanctum_loaded(&image_name_string, pid);
+}
 
-    // todo the match here should be done on the full path to accidental prevent name collisions
-    if name.ends_with("sanctum.dll") {
-        if ImageLoadQueueForInjector::remove_pid_from_injection_waitlist(pid as usize).is_err() {
-            // todo handle threat detection here
+fn block_until_sanctum_loaded(image_name_string: &String, pid: u32) {
+    if image_name_string.contains("kernelbase.dll") {
+        let mut thread_sleep_time = duration_to_large_int(Duration::from_secs(1));
+        let mut count = 0;
+
+        loop {
+            let _ = unsafe {
+                KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time)
+            };
+
+            if ProcessMonitor::is_sanc_dll_initialised(pid) {
+                break;
+            }
+
+            count += 1;
+            if count > 4 {
+                // todo some telemetry, this is either a bug or threat, we need this in otherwise the driver will go into
+                // UB with current implementation :)
+                println!(
+                    "Process started: {}, but did not load Sanctum dll, or it did not initialise. PID: {}",
+                    get_process_name(),
+                    unsafe { PsGetCurrentProcessId() as u32 }
+                );
+
+                break;
+            }
         }
     }
+}
 
-    // For now, only inject into these processes whilst we test
-    if !name.contains("malware.exe") {
-        return;
+/// Gets the image name of the process for which the image is being loaded, provided by the
+/// callback routine (we convert to a rust String).
+fn get_image_name(image_name: *mut UNICODE_STRING) -> String {
+    if image_name.is_null() {
+        // todo proper error
+        return String::new();
     }
 
-    ImageLoadQueueForInjector::queue_process_for_usermode(pid as usize);
+    let image_name = unsafe { *image_name };
 
-    let delay_as_duration = Duration::from_millis(300);
-    let mut thread_sleep_time = LARGE_INTEGER {
-        QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
-    };
-
-    loop {
-        // todo I'd rather use a KEVENT than a loop - just need to think about the memory model for it.
-        // Tried implementing this now, but as im at POC phase it required quite a bit of a refactor, so i'll do this in the
-        // future more likely. Leaving the todo in to work on this later :)
-        // The least we can do is make the threat alertable so we aren't starving too many resources.
-        let _ =
-            unsafe { KeDelayExecutionThread(KernelMode as _, TRUE as _, &mut thread_sleep_time) };
-
-        if !ImageLoadQueueForInjector::pid_in_waitlist(pid as usize) {
-            break;
-        }
-    }
+    let name_slice = slice_from_raw_parts(image_name.Buffer, (image_name.Length / 2) as usize);
+    String::from_utf16_lossy(unsafe { &*name_slice }).to_lowercase()
 }

@@ -43,6 +43,7 @@
         "IOCTLS",
         "Irql",
         "KAPC",
+        "kernelbase",
         "KEVENT",
         "KIRQL",
         "KLDR",

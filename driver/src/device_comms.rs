@@ -651,6 +651,61 @@ pub fn ioctl_dll_hook_syscall(
     Ok(())
 }
 
+/// Tells the driver a given process is ready for ghost hunting (to be called after successful re-locations of ntdll by
+/// sanctum.dll).
+pub fn ioctl_process_finished_sanc_dll_load(
+    p_stack_location: *mut _IO_STACK_LOCATION,
+    pirp: PIRP,
+) -> NTSTATUS {
+    let mut ioctl_buffer = IoctlBuffer::new(p_stack_location, pirp);
+    if ioctl_buffer.receive().is_err() {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    let input_data = ioctl_buffer.buf as *const _ as *const u32;
+    if input_data.is_null() {
+        println!("[sanctum] [-] Error receiving input data for ioctl_proc_r_gh.");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // SAFETY: Pointer validity checked above
+    let pid = unsafe { *input_data };
+
+    ProcessMonitor::mark_process_ready_for_ghost_hunting(pid);
+
+    STATUS_SUCCESS
+}
+
+pub fn ioctl_failed_to_inject_dll(
+    p_stack_location: *mut _IO_STACK_LOCATION,
+    pirp: PIRP,
+) -> Result<(), NTSTATUS> {
+    let mut ioctl_buffer = IoctlBuffer::new(p_stack_location, pirp);
+    ioctl_buffer.receive()?; // receive the data
+
+    let input_data = ioctl_buffer.buf as *const _ as *const u8;
+    if input_data.is_null() {
+        println!("[sanctum] [-] Error receiving input data ioctl_failed_to_inject_dll.");
+        return Err(STATUS_UNSUCCESSFUL);
+    }
+
+    // SAFETY: Pointer validity checked above
+    let input_data = unsafe { from_raw_parts(input_data, ioctl_buffer.len as usize) };
+    let pid: u32 = match serde_json::from_slice(&input_data) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("Failed to parse JSON from user: {:?}", e);
+            return Err(STATUS_INVALID_PARAMETER);
+        }
+    };
+
+    if ImageLoadQueueForInjector::remove_pid_from_injection_waitlist(pid as usize).is_err() {
+        // todo handle threat detection here (n.b. duplicate in image callbacks)
+    }
+
+    Ok(())
+}
+
 #[derive(Debug)]
 enum ImageLoadQueueSelector {
     Cache,
@@ -777,9 +832,9 @@ impl ImageLoadQueueForInjector {
 
         if lock.insert(pid) == false {
             println!(
-                "[sanctum] [i] ImageLoadQueuePendingInjection had duplicate key for pid: {pid}, this should not occur."
+                "[sanctum] [i] ImageLoadQueuePendingInjection had duplicate key for pid: {pid}. This requires some further \
+                    investigation at some point."
             );
-            panic!(); // maybe bsod here? this state should never occur
         }
     }
 

@@ -55,8 +55,6 @@ const NT_DEVICE_IO_CONTROL_FILE: u32 = 0x0007;
 const NT_CREATE_FILE_SSN: u32 = 0x0055;
 const NT_TRACE_EVENT_SSN: u32 = 0x005e;
 
-pub static g_alt_syscalls_enabled: AtomicBool = AtomicBool::new(false);
-
 pub struct AltSyscalls;
 
 #[repr(C)]
@@ -136,7 +134,7 @@ impl AltSyscalls {
         // SAFETY: Check the offset size will fit into a u32
         if rva_offset_callback > u32::MAX as _ {
             println!(
-                "[sanctum] [-] OFfset calculation very wrong? Offset: {:#x}",
+                "[sanctum] [-] Offset calculation very wrong? Offset: {:#x}",
                 rva_offset_callback
             );
             return;
@@ -176,7 +174,7 @@ impl AltSyscalls {
         }
 
         // Enumerate all active processes and threads, and enable the relevant bits so that the alt syscall 'machine' can work :)
-        Self::walk_active_processes_and_set_bits(AltSyscallStatus::Enable, None);
+        // Self::walk_active_processes_and_set_bits(AltSyscallStatus::Enable, None);
     }
 
     /// Sets the required context bits in memory on thread and KTHREAD.
@@ -266,15 +264,6 @@ impl AltSyscalls {
         status: AltSyscallStatus,
         isolated_processes: Option<&[&str]>,
     ) {
-        match status {
-            AltSyscallStatus::Enable => {
-                g_alt_syscalls_enabled.store(true, Ordering::SeqCst);
-            }
-            AltSyscallStatus::Disable => {
-                g_alt_syscalls_enabled.store(false, Ordering::SeqCst);
-            }
-        }
-
         let current_process = unsafe { IoGetCurrentProcess() };
         if current_process.is_null() {
             println!("[sanctum] [-] current_process was NULL");
@@ -459,7 +448,7 @@ pub unsafe extern "system" fn syscall_handler(
 ) -> i32 {
     // todo remove once ready for mass testing
     let proc_name = get_process_name().to_lowercase();
-    if !proc_name.contains("malware.e") {
+    if !proc_name.contains("notepad.e") && !proc_name.contains("alware.e") {
         return 1;
     }
 

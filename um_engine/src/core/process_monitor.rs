@@ -2,11 +2,19 @@ use std::ffi::c_void;
 
 use shared_no_std::constants::SANCTUM_DLL_RELATIVE_PATH;
 use windows::{
-    Win32::System::{
-        Diagnostics::Debug::WriteProcessMemory,
-        LibraryLoader::{GetModuleHandleA, GetProcAddress},
-        Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAllocEx},
-        Threading::{CreateRemoteThread, OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_WRITE},
+    Win32::{
+        Foundation::GetLastError,
+        System::{
+            Diagnostics::Debug::WriteProcessMemory,
+            LibraryLoader::{GetModuleHandleA, GetProcAddress},
+            Memory::{
+                MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, VirtualAllocEx,
+            },
+            Threading::{
+                CreateRemoteThread, OpenProcess, PROCESS_CREATE_THREAD,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+            },
+        },
     },
     core::s,
 };
@@ -17,11 +25,23 @@ use crate::utils::env::get_logged_in_username;
 /// processes which are newly created.
 pub fn inject_edr_dll(pid: u64) -> Result<(), ProcessErrors> {
     // Open the process
-    let h_process =
-        unsafe { OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_WRITE, false, pid as u32) };
+    let h_process = unsafe {
+        OpenProcess(
+            PROCESS_VM_OPERATION
+                | PROCESS_VM_WRITE
+                | PROCESS_CREATE_THREAD
+                | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid as u32,
+        )
+    };
     let h_process = match h_process {
         Ok(h) => h,
-        Err(_) => return Err(ProcessErrors::FailedToOpenProcess),
+        Err(_) => {
+            return Err(ProcessErrors::FailedToOpenProcess(unsafe {
+                GetLastError().0 as i32
+            }));
+        }
     };
 
     // Get a handle to Kernel32.dll
@@ -51,7 +71,7 @@ pub fn inject_edr_dll(pid: u64) -> Result<(), ProcessErrors> {
             None,
             path_len,
             MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_READWRITE,
+            PAGE_READWRITE,
         )
     };
 
@@ -94,7 +114,9 @@ pub fn inject_edr_dll(pid: u64) -> Result<(), ProcessErrors> {
     };
 
     if h_thread.is_err() {
-        return Err(ProcessErrors::FailedToCreateRemoteThread);
+        return Err(ProcessErrors::FailedToCreateRemoteThread(unsafe {
+            GetLastError().0 as _
+        }));
     }
 
     Ok(())
@@ -108,6 +130,6 @@ pub enum ProcessErrors {
     BadFnAddress,
     BaseAddressNull,
     FailedToWriteMemory,
-    FailedToCreateRemoteThread,
-    FailedToOpenProcess,
+    FailedToCreateRemoteThread(i32),
+    FailedToOpenProcess(i32),
 }

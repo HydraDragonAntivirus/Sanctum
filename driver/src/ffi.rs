@@ -1,12 +1,13 @@
 // FFI for functions not yet implemented in the Rust Windows Driver project
 
-use core::{ffi::c_void, ptr::null_mut};
+use core::{arch::asm, ffi::c_void, ptr::null_mut};
 
 use wdk_sys::{
     _EVENT_TYPE::SynchronizationEvent,
-    ACCESS_MASK, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR, LIST_ENTRY,
-    NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE, PIO_STACK_LOCATION, PIRP,
-    POBJECT_ATTRIBUTES, PROCESSINFOCLASS, PSECURITY_DESCRIPTOR, PULONG, PUNICODE_STRING, ULONG,
+    ACCESS_MASK, BOOLEAN, DISPATCH_LEVEL, FALSE, FAST_MUTEX, FM_LOCK_BIT, HANDLE, HANDLE_PTR,
+    KPRIORITY, KPROCESSOR_MODE, LIST_ENTRY, NTSTATUS, OBJECT_ATTRIBUTES, PDRIVER_OBJECT, PHANDLE,
+    PIO_STACK_LOCATION, PIRP, PKAPC, PKTHREAD, POBJECT_ATTRIBUTES, PRKAPC, PROCESSINFOCLASS,
+    PSECURITY_DESCRIPTOR, PSIZE_T, PULONG, PUNICODE_STRING, PVOID, SIZE_T, ULONG,
     ntddk::{KeGetCurrentIrql, KeInitializeEvent},
 };
 
@@ -71,9 +72,7 @@ unsafe extern "system" {
         len: ULONG,
         return_len: PULONG,
     ) -> NTSTATUS;
-}
 
-unsafe extern "system" {
     pub unsafe fn ZwGetNextProcess(
         handle: HANDLE,
         access: ACCESS_MASK,
@@ -90,7 +89,53 @@ unsafe extern "system" {
         flags: ULONG,
         new_thread_handle: PHANDLE,
     ) -> NTSTATUS;
+
+    pub fn KeInitializeApc(
+        Apc: PKAPC,
+        Thread: PKTHREAD,
+        ApcStateIndex: KAPC_ENVIRONMENT,
+        KernelRoutine: *const c_void,
+        RundownRoutine: *const c_void,
+        NormalRoutine: *const c_void,
+        ApcMode: KPROCESSOR_MODE,
+        NormalContext: PVOID,
+    );
+
+    pub fn KeInsertQueueApc(
+        Apc: PKAPC,
+        SystemArgument1: PVOID,
+        SystemArgument2: PVOID,
+        Increment: KPRIORITY,
+    ) -> BOOLEAN;
+
+    pub unsafe fn PsGetCurrentProcess() -> *const c_void;
+
+    pub fn ZwProtectVirtualMemory(
+        ProcessHandle: HANDLE,
+        BaseAddress: *mut PVOID,
+        RegionSize: PSIZE_T,
+        NewProtect: ULONG,
+        OldProtect: PULONG,
+    ) -> NTSTATUS;
+
+    pub fn KeTestAlertThread(AlertMode: KPROCESSOR_MODE);
 }
+
+pub type PKNORMAL_ROUTINE = unsafe extern "C" fn(PVOID, PVOID, PVOID);
+pub type PKRUNDOWN_ROUTINE = unsafe extern "C" fn(PRKAPC);
+pub type PKKERNEL_ROUTINE =
+    unsafe extern "C" fn(PRKAPC, PKNORMAL_ROUTINE, *mut PVOID, *mut PVOID, *mut PVOID);
+
+#[repr(C)]
+pub enum _KAPC_ENVIRONMENT {
+    OriginalApcEnvironment,
+    AttachedApcEnvironment,
+    CurrentApcEnvironment,
+    InsertApcEnvironment,
+}
+
+pub type KAPC_ENVIRONMENT = _KAPC_ENVIRONMENT;
+pub type PKAPC_ENVIRONMENT = *mut _KAPC_ENVIRONMENT;
 
 #[repr(C, packed(2))]
 pub struct IMAGE_DOS_HEADER {
@@ -202,4 +247,16 @@ pub struct PEB_LDR_DATA {
     pub Reserved1: [u8; 8],
     pub Reserved2: [*mut c_void; 3],
     pub InMemoryOrderModuleList: LIST_ENTRY,
+}
+
+pub fn GetCurrentThread() -> PKTHREAD {
+    let mut k_thread: *const c_void = null_mut();
+    unsafe {
+        asm!(
+            "mov {}, gs:[0x188]",
+            out(reg) k_thread,
+        );
+    }
+
+    k_thread as _
 }
