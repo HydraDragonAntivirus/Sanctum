@@ -31,11 +31,12 @@ use crate::{
         SSN_NT_WRITE_VM,
     },
     core::process_monitor::ProcessMonitor,
-    utils::{DriverError, duration_to_large_int, get_process_name, handle_to_pid},
+    utils::{DriverError, duration_to_large_int, handle_to_pid},
 };
 
 /// Whether to allow the syscall to dispatch by the dispatcher
 #[repr(i32)]
+#[derive(Debug)]
 pub enum AllowSyscall {
     No = 0x0,
     Yes = 0x1,
@@ -93,6 +94,7 @@ static SYSCALL_PP_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SYSCALL_CANCEL_THREAD: AtomicBool = AtomicBool::new(false);
 static SYSCALL_THREAD_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
+#[derive(Debug)]
 pub struct KernelSyscallIntercept {
     pub syscall: Syscall,
 }
@@ -107,6 +109,8 @@ impl KernelSyscallIntercept {
         // our hooking needs.
         //
         let rax = ktrap_frame.Rax as u32;
+
+        // println!("Intercepting {rax:#X}");
 
         let syscall_data: (Option<Syscall>, AllowSyscall) = match rax {
             SSN_NT_ALLOCATE_VIRTUAL_MEMORY => Self::nt_allocate_vm(ktrap_frame),
@@ -253,8 +257,6 @@ impl KernelSyscallIntercept {
         if remote_pid == current_pid {
             return (None, AllowSyscall::Yes);
         }
-
-        println!("in p, remote: {remote_pid}, cur: {current_pid}");
 
         let access_mask = ktrap_frame.Rdx as u32;
 

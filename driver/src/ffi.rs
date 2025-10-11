@@ -1,6 +1,6 @@
 // FFI for functions not yet implemented in the Rust Windows Driver project
 
-use core::{ffi::c_void, ptr::null_mut};
+use core::{arch::asm, ffi::c_void, ptr::null_mut};
 
 use wdk_sys::{
     _EVENT_TYPE::SynchronizationEvent,
@@ -94,9 +94,9 @@ unsafe extern "system" {
         Apc: PKAPC,
         Thread: PKTHREAD,
         ApcStateIndex: KAPC_ENVIRONMENT,
-        KernelRoutine: Option<PKKERNEL_ROUTINE>,
-        RundownRoutine: Option<PKRUNDOWN_ROUTINE>,
-        NormalRoutine: Option<*const c_void>,
+        KernelRoutine: *const c_void,
+        RundownRoutine: *const c_void,
+        NormalRoutine: *const c_void,
         ApcMode: KPROCESSOR_MODE,
         NormalContext: PVOID,
     );
@@ -117,6 +117,8 @@ unsafe extern "system" {
         NewProtect: ULONG,
         OldProtect: PULONG,
     ) -> NTSTATUS;
+
+    pub fn KeTestAlertThread(AlertMode: KPROCESSOR_MODE);
 }
 
 pub type PKNORMAL_ROUTINE = unsafe extern "C" fn(PVOID, PVOID, PVOID);
@@ -245,4 +247,16 @@ pub struct PEB_LDR_DATA {
     pub Reserved1: [u8; 8],
     pub Reserved2: [*mut c_void; 3],
     pub InMemoryOrderModuleList: LIST_ENTRY,
+}
+
+pub fn GetCurrentThread() -> PKTHREAD {
+    let mut k_thread: *const c_void = null_mut();
+    unsafe {
+        asm!(
+            "mov {}, gs:[0x188]",
+            out(reg) k_thread,
+        );
+    }
+
+    k_thread as _
 }

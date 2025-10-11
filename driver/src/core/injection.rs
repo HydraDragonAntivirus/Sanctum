@@ -1,50 +1,141 @@
-use core::{arch::asm, ffi::c_void, iter::once, ptr::null_mut, sync::atomic::Ordering};
+use core::{ffi::c_void, iter::once, ptr::null_mut, sync::atomic::Ordering};
 
 use alloc::vec::Vec;
 use anyhow::{Result, bail};
 use wdk::{nt_success, println};
 use wdk_sys::{
-    HANDLE, MEM_COMMIT, PAGE_EXECUTE_READ, PAGE_READWRITE, UNICODE_STRING,
+    _MODE::{KernelMode, UserMode},
+    HANDLE, IO_NO_INCREMENT, KAPC, MEM_COMMIT, PAGE_EXECUTE_READ, PAGE_READWRITE, PKTHREAD,
+    POOL_FLAG_NON_PAGED, PRKAPC, PVOID, UNICODE_STRING,
     ntddk::{
-        PsGetCurrentProcessId, RtlCopyMemoryNonTemporal, RtlInitUnicodeString,
+        ExAllocatePool2, ExFreePool, RtlCopyMemoryNonTemporal, RtlInitUnicodeString,
         ZwAllocateVirtualMemory,
     },
 };
 
 use crate::{
     core::process_monitor::{MONITORED_FN_PTRS, SensitiveAPI},
-    ffi::ZwProtectVirtualMemory,
-    utils::get_process_name,
+    ffi::{
+        GetCurrentThread, KeInitializeApc, KeInsertQueueApc, KeTestAlertThread, PKNORMAL_ROUTINE,
+        ZwProtectVirtualMemory,
+    },
 };
 
-// todo this needs to work for all users -> maybe its a System32 job
-const SANCTUM_HOOK_DLL_PATH: &str = r"\??\C:\Users\flux\AppData\Roaming\Sanctum\sanctum.dll";
+const SANCTUM_HOOK_DLL_PATH: &str = r"sanctum.dll";
 
 /// Injects the sanctum DLL which hooks NTDLL into the current process (must be called from an image load callback).
 ///
-/// Methodology graciously provided by https://github.com/eversinc33, including the bootstrapping shellcode and using
-/// LdrLoadDll to make this work, I was having trouble with some instability and he donated his methodology :) thank you!
+/// ### With massive thanks to:
+/// - eversinc33 https://x.com/eversinc33 - who provided me access to his src for getting this to work :3
+/// - Dennis A. Babkin & Rbmm - helpful blog https://dennisbabkin.com/blog/?t=depths-of-windows-apc-aspects-of-asynchronous-procedure-call-internals-from-kernel-mode
+/// - 0xrepnz https://x.com/0xrepnz - cool blog https://repnz.github.io/posts/apc/kernel-user-apc-api/
 pub fn inject_dll() -> Result<()> {
-    let pid = unsafe { PsGetCurrentProcessId() } as u32;
-    let img_name = get_process_name();
-
-    println!("[sanctum] [i] Injecting into process {img_name}, pid: {pid}",);
+    // Inject shellcode into the process to bootstrap the DLL injection
     let shellcode_va = write_shellcode_in_process_for_injection()?;
+    // Queue and force the APC to execute LdrLoadDll to inject the DLL
+    let _ = queue_apc_run_shellcode(shellcode_va, GetCurrentThread())?;
 
     Ok(())
 }
 
-fn generate_unicode_path_for_dll() -> UNICODE_STRING {
-    let path: Vec<u16> = SANCTUM_HOOK_DLL_PATH
-        .encode_utf16()
-        .chain(once(0))
-        .collect();
+/// Queues two APC's to execute LdrLoadDll in the process which is being created. The first APC is the user
+/// routine which runs a shellcode bootstrap. The second is a kernel APC which forces the thread to become
+/// alertable, thus, immediately executing our usermode APC.
+fn queue_apc_run_shellcode(shellcode_addr: *const c_void, thread: PKTHREAD) -> Result<()> {
+    if shellcode_addr.is_null() {
+        bail!("Shellcode address was null.");
+    }
 
-    let mut us = UNICODE_STRING::default();
+    //
+    // Initialise kernel APC
+    //
 
-    unsafe { RtlInitUnicodeString(&mut us, path.as_ptr()) };
+    let kapc = unsafe {
+        ExAllocatePool2(
+            POOL_FLAG_NON_PAGED,
+            size_of::<KAPC>() as u64,
+            u32::from_le_bytes(*b"sanc"),
+        )
+    } as *mut KAPC;
 
-    us
+    unsafe {
+        KeInitializeApc(
+            &mut *kapc,
+            thread,
+            crate::ffi::_KAPC_ENVIRONMENT::OriginalApcEnvironment,
+            kernel_prepare_inject_apc as *const c_void,
+            rundown as *const c_void,
+            null_mut(),
+            KernelMode as i8,
+            null_mut(),
+        );
+    }
+
+    //
+    // Initialize user mode APC to call LdrLoadDll
+    //
+
+    let apc = unsafe {
+        ExAllocatePool2(
+            POOL_FLAG_NON_PAGED,
+            size_of::<KAPC>() as u64,
+            u32::from_le_bytes(*b"sanc"),
+        )
+    } as *mut KAPC;
+
+    unsafe {
+        KeInitializeApc(
+            &mut *apc,
+            thread,
+            crate::ffi::_KAPC_ENVIRONMENT::OriginalApcEnvironment,
+            apc_callback_inject_sanctum as *const c_void, // failure = access violation
+            rundown as *const c_void,
+            shellcode_addr,
+            UserMode as i8,
+            null_mut(),
+        );
+    }
+
+    let status =
+        unsafe { KeInsertQueueApc(&mut *apc, null_mut(), null_mut(), IO_NO_INCREMENT as _) };
+    if !nt_success(status as _) {
+        bail!("Failed to insert APC for shellcode execution. Code: {status:#X}");
+    }
+
+    let status =
+        unsafe { KeInsertQueueApc(&mut *kapc, null_mut(), null_mut(), IO_NO_INCREMENT as _) };
+    if !nt_success(status as _) {
+        bail!("Failed to insert KAPC for shellcode execution. Code: {status:#X}");
+    }
+
+    Ok(())
+}
+
+unsafe extern "C" fn rundown(apc: PRKAPC) {
+    unsafe {
+        ExFreePool(apc as _);
+    }
+}
+
+unsafe extern "C" fn apc_callback_inject_sanctum(
+    apc: PRKAPC,
+    _normal_routine: *mut c_void,
+    _normal_context: *mut PVOID,
+    _system_arg_1: *mut PVOID,
+    _system_arg_2: *mut PVOID,
+) {
+    unsafe { rundown(apc) };
+}
+
+unsafe extern "C" fn kernel_prepare_inject_apc(
+    apc: PRKAPC,
+    _normal_routine: PKNORMAL_ROUTINE,
+    _normal_context: *mut PVOID,
+    _system_arg_1: *mut PVOID,
+    _system_arg_2: *mut PVOID,
+) {
+    unsafe { KeTestAlertThread(UserMode as i8) };
+    unsafe { rundown(apc) };
 }
 
 /// Write shellcode into the **current** process for which this is called. The shellcode written causes
@@ -53,13 +144,20 @@ fn generate_unicode_path_for_dll() -> UNICODE_STRING {
 /// # Returns
 /// The virtual address within the target process of where the shellcode was written, or an error.
 fn write_shellcode_in_process_for_injection() -> Result<*const c_void> {
-    let dll_path_to_inject = generate_unicode_path_for_dll();
+    let path: Vec<u16> = SANCTUM_HOOK_DLL_PATH
+        .encode_utf16()
+        .chain(once(0))
+        .collect();
+
+    let mut dll_path_to_inject = UNICODE_STRING::default();
+
+    unsafe { RtlInitUnicodeString(&mut dll_path_to_inject, path.as_ptr()) };
 
     //
     // Shellcode to load a DLL into a process via LdrLoadDll
     //
-    let mut shellcode: [u8; 47] = [
-        0x48, 0x83, 0xEC, 0x28, // sub rsp, 0x28
+    let mut shellcode = [
+        0x48u8, 0x83, 0xEC, 0x28, // sub rsp, 0x28
         0x48, 0x31, 0xD2, // xor rdx, rdx
         0x48, 0x31, 0xC9, // xor rcx, rcx
         0x49, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, // mov r8, [remoteUnicodeString]
@@ -70,15 +168,15 @@ fn write_shellcode_in_process_for_injection() -> Result<*const c_void> {
         0xC3, // ret
     ];
 
-    println!("Shellcode addr: {:p}", &shellcode);
-
     //
     // Allocate memory for the DLL name and the unicode_string struct
     //
     let dll_name_len: usize = dll_path_to_inject.Length as usize + size_of::<u16>(); // include space for null terminator
     let mut shellcode_size = shellcode.len() as u64;
-    let mut total_size: u64 =
-        shellcode_size + size_of::<UNICODE_STRING>() as u64 + size_of::<*const c_void>() as u64;
+    let mut total_size: u64 = shellcode_size
+        + size_of::<UNICODE_STRING>() as u64
+        + dll_name_len as u64
+        + size_of::<*const c_void>() as u64;
     let mut remote_shellcode_memory = null_mut();
     let mut remote_memory = null_mut();
 
@@ -117,15 +215,15 @@ fn write_shellcode_in_process_for_injection() -> Result<*const c_void> {
     //
     // Structure of memory:
     //
-    // 1 - Shellcode R(W)X
+    // Alloc 1  - Shellcode R(W)X (remote_shellcode_memory)
     //
-    // 2 - UNICODE_STRING RW
-    //   - OUT HANDLE
-    //   - Dll Name
+    // Alloc 2  - UNICODE_STRING RW (remote_memory)
+    //          - OUT HANDLE
+    //          - Dll Name
     //
 
     let remote_unicode_string = remote_memory;
-    let remote_handle_out = (remote_memory as usize + size_of::<UNICODE_STRING>()) as *mut c_void;
+    let remote_handle_out = unsafe { remote_memory.add(size_of::<UNICODE_STRING>()) };
     let remote_dll_name = (remote_memory as usize
         + size_of::<UNICODE_STRING>()
         + size_of::<*mut c_void>()) as *mut c_void;
@@ -212,10 +310,9 @@ fn write_shellcode_in_process_for_injection() -> Result<*const c_void> {
 
         if !nt_success(status) {
             println!("Failed to mark shellcode memory as executable. Status: {status:#X}");
+
             // todo free memory
         }
-
-        println!("All allocations succeeded. Shellcode at: {remote_shellcode_memory:p}",);
     }
 
     Ok(remote_shellcode_memory)

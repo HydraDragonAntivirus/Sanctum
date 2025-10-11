@@ -20,6 +20,7 @@ pub enum SyscallEventSource {
 pub enum DLLMessage {
     SyscallWrapper(Syscall),
     NtdllOverwrite,
+    ProcessReadyForGhostHunting,
 }
 
 /****************************** SYSCALLS *******************************/
@@ -38,10 +39,7 @@ pub struct Syscall {
 }
 
 impl Syscall {
-    pub fn from_kernel(
-        process_initiating_pid: u32,
-        data: NtFunction
-    ) -> Self {
+    pub fn from_kernel(process_initiating_pid: u32, data: NtFunction) -> Self {
         Self {
             pid: process_initiating_pid,
             source: SyscallEventSource::EventSourceKernel,
@@ -49,10 +47,7 @@ impl Syscall {
         }
     }
 
-    pub fn from_sanctum_dll(
-        process_initiating_pid: u32,
-        data: NtFunction
-    ) -> Self {
+    pub fn from_sanctum_dll(process_initiating_pid: u32, data: NtFunction) -> Self {
         Self {
             pid: process_initiating_pid,
             source: SyscallEventSource::EventSourceSyscallHook,
@@ -62,10 +57,10 @@ impl Syscall {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, EnumIter)]
-/// A representation of an Nt function which contains an inner data carrier for arguments we wish 
+/// A representation of an Nt function which contains an inner data carrier for arguments we wish
 /// to monitor related to that syscall directly.
-/// 
-/// This is also represented as a C style numbered enum which can be OR'ed into a flag. To see the 
+///
+/// This is also represented as a C style numbered enum which can be OR'ed into a flag. To see the
 /// numeric types, see individual enum docs. To access this functionality, see [`NtFunction::as_mask`]
 pub enum NtFunction {
     /// None is provided to allow `EnumIter` to work, this should never match anything
@@ -78,11 +73,11 @@ pub enum NtFunction {
 }
 
 impl NtFunction {
-    pub const M_NONE: u64               = 0x0;
-    pub const M_NT_OPEN_PROCESS: u64    = 1 << 0;
-    pub const M_NT_WRITE_VM: u64        = 1 << 1;
-    pub const M_NT_ALLOC_VM: u64           = 1 << 2;
-    pub const M_CREATE_THREAD_EX: u64   = 1 << 3;
+    pub const M_NONE: u64 = 0x0;
+    pub const M_NT_OPEN_PROCESS: u64 = 1 << 0;
+    pub const M_NT_WRITE_VM: u64 = 1 << 1;
+    pub const M_NT_ALLOC_VM: u64 = 1 << 2;
+    pub const M_CREATE_THREAD_EX: u64 = 1 << 3;
 
     pub fn as_mask(&self) -> u64 {
         let m = match self {

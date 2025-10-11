@@ -75,6 +75,8 @@ pub struct MonitoredApis {
 }
 
 mod process {
+    use core::sync::atomic::AtomicBool;
+
     use alloc::{string::String, vec::Vec};
 
     use crate::{
@@ -84,7 +86,7 @@ mod process {
 
     /// A `Process` is a Sanctum driver representation of a Windows process so that actions it preforms, and is performed
     /// onto it, can be tracked and monitored.
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Default)]
     pub struct Process {
         pub pid: u32,
         /// Parent pid
@@ -106,6 +108,7 @@ mod process {
         // we don't readily have this data. If the driver is loaded as ELAM then this wouldn't be such
         // a problem.
         pub loaded_modules: Option<LoadedModules>,
+        pub process_ready_for_ghost_hunting: AtomicBool,
     }
 
     impl Process {
@@ -442,11 +445,50 @@ impl ProcessMonitor {
         let _ = process_lock.remove(&pid);
     }
 
+    /// Marks a process as being ready for ghost hunting once everything has been loaded and switched on.
+    ///
+    /// This function should be called after the Sanctum DLL is loaded into the process, and alt syscalls are turned on
+    /// on the image load notification.
+    pub fn mark_process_ready_for_ghost_hunting(pid: u32) {
+        let mut process_lock = ProcessMonitor::get_mtx_inner();
+
+        if let Some(process) = process_lock.get_mut(&pid) {
+            process
+                .process_ready_for_ghost_hunting
+                .store(true, Ordering::SeqCst);
+        }
+    }
+
+    pub fn is_sanc_dll_initialised(pid: u32) -> bool {
+        let process_lock = ProcessMonitor::get_mtx_inner();
+
+        if let Some(process) = process_lock.get(&pid) {
+            return process
+                .process_ready_for_ghost_hunting
+                .load(Ordering::SeqCst);
+        }
+
+        // todo this is an error..
+        false
+    }
+
     /// Notifies the Ghost Hunting management that a new huntable event has occurred.
     pub fn ghost_hunt_add_event(signal: Syscall) {
         let mut process_lock = ProcessMonitor::get_mtx_inner();
 
         if let Some(process) = process_lock.get_mut(&signal.pid) {
+            // If the process is not yet ready for ghost hunting (aka the Sanc DLL isn't fully
+            // loaded yet)
+            if !process
+                .process_ready_for_ghost_hunting
+                .load(Ordering::SeqCst)
+            {
+                return;
+            }
+
+            // Process is ready for GH, so add..
+            println!("[sanctum] [*******] Adding event.. {signal:?}");
+
             let mut current_time = LARGE_INTEGER::default();
             unsafe { KeQuerySystemTimePrecise(&mut current_time) };
 
@@ -495,6 +537,8 @@ impl ProcessMonitor {
             // We can use the `extract_if` unstable API for `Vec`
             //
 
+            println!("Number of timers: {}", process.ghost_hunting_timers.len());
+
             for timer in process.ghost_hunting_timers.extract_if(.., |t| {
                 let mut current_time = LARGE_INTEGER::default();
                 unsafe { KeQuerySystemTimePrecise(&mut current_time) };
@@ -514,7 +558,7 @@ impl ProcessMonitor {
 
         if !processes_to_terminate.is_empty() {
             for p in processes_to_terminate {
-                respond_to_gh_timer_expiry(p.0, &p.1);
+                // respond_to_gh_timer_expiry(p.0, &p.1);
             }
         }
     }
@@ -635,7 +679,7 @@ unsafe extern "C" fn process_monitor_worker_thread(_: *mut c_void) {
         QuadPart: -((delay_as_duration.as_nanos() / 100) as i64),
     };
 
-    let max_time_allowed_for_ghost_hunting_delta = Duration::from_secs(1);
+    let max_time_allowed_for_ghost_hunting_delta = Duration::from_secs(2);
     let max_time_allowed_for_ghost_hunting_delta = LARGE_INTEGER {
         QuadPart: ((max_time_allowed_for_ghost_hunting_delta.as_nanos() / 100) as i64),
     };

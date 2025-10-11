@@ -1,10 +1,14 @@
 //! Stubs that act as callback functions from syscalls.
 
-use crate::{integrity::get_base_and_sz_ntdll, ipc::{send_ipc_to_engine}, SYSCALL_NUMBER};
+use crate::{SYSCALL_NUMBER, integrity::get_base_and_sz_ntdll, ipc::send_ipc_to_engine};
 use shared_no_std::ghost_hunting::{
-    DLLMessage, NtAllocateVirtualMemoryData, NtCreateThreadExData, NtFunction, NtOpenProcessData, NtWriteVirtualMemoryData, Syscall, SyscallEventSource
+    DLLMessage, NtAllocateVirtualMemoryData, NtCreateThreadExData, NtFunction, NtOpenProcessData,
+    NtWriteVirtualMemoryData, Syscall, SyscallEventSource,
 };
-use std::{arch::{asm, naked_asm}, ffi::c_void};
+use std::{
+    arch::{asm, naked_asm},
+    ffi::c_void,
+};
 use windows::Win32::{
     Foundation::HANDLE,
     System::{
@@ -28,21 +32,21 @@ pub fn nt_open_process(
     if !client_id.is_null() {
         let target_pid = unsafe { (*client_id).UniqueProcess.0 } as u32;
         let pid = unsafe { GetCurrentProcessId() };
-        
-        let data = DLLMessage::SyscallWrapper(
-            Syscall::from_sanctum_dll(
-                pid, 
-                NtFunction::NtOpenProcess(
-                    NtOpenProcessData {
-                        target_pid,
-                        desired_mask: desired_access,
-                    },
-                ),
-            )
-        );
 
-        // send the telemetry to the engine
-        send_ipc_to_engine(data);
+        // Currently only interested in foreign process handles..
+        if target_pid != pid {
+            println!("PID: {pid}, target: {target_pid}");
+            let data = DLLMessage::SyscallWrapper(Syscall::from_sanctum_dll(
+                pid,
+                NtFunction::NtOpenProcess(NtOpenProcessData {
+                    target_pid,
+                    desired_mask: desired_access,
+                }),
+            ));
+
+            // send the telemetry to the engine
+            send_ipc_to_engine(data);
+        }
     }
 
     let ssn = *SYSCALL_NUMBER
@@ -101,12 +105,7 @@ pub fn virtual_alloc_ex(
             protect_flags: protect,
         });
 
-        let syscall = DLLMessage::SyscallWrapper(
-            Syscall::from_sanctum_dll(
-                pid, 
-                data
-            )
-        );
+        let syscall = DLLMessage::SyscallWrapper(Syscall::from_sanctum_dll(pid, data));
 
         send_ipc_to_engine(syscall);
     }
@@ -165,8 +164,8 @@ pub fn nt_write_virtual_memory(
             target_pid: remote_pid,
             base_address: base_addr_as_usize,
             buf_len: buf_len_as_usize,
-        })
-    ); 
+        }),
+    );
 
     send_ipc_to_engine(DLLMessage::SyscallWrapper(data));
 
@@ -292,16 +291,16 @@ pub fn nt_create_thread_ex_intercept(
                 target_pid: remote_pid,
                 start_routine: start_routine as usize,
                 argument: arg as usize,
-            })
-        ); 
+            }),
+        );
 
         send_ipc_to_engine(DLLMessage::SyscallWrapper(data));
     }
-    
+
     // proceed with the syscall
     let ssn = *SYSCALL_NUMBER
-    .get("NtCreateThreadEx")
-    .expect("failed to find function hook for NtCreateThreadEx");
+        .get("NtCreateThreadEx")
+        .expect("failed to find function hook for NtCreateThreadEx");
 
     nt_create_thread_ex_naked(
         thread_handle,
@@ -334,10 +333,5 @@ extern "system" fn nt_create_thread_ex_naked(
     attribute_list: *const c_void,
     ssn: u32,
 ) {
-    naked_asm!(
-        "mov r10, rcx",
-        "mov eax, [rsp+0x60]",
-        "syscall",
-        "ret",
-    )
+    naked_asm!("mov r10, rcx", "mov eax, [rsp+0x60]", "syscall", "ret",)
 }

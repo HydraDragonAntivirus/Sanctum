@@ -134,7 +134,7 @@ impl AltSyscalls {
         // SAFETY: Check the offset size will fit into a u32
         if rva_offset_callback > u32::MAX as _ {
             println!(
-                "[sanctum] [-] OFfset calculation very wrong? Offset: {:#x}",
+                "[sanctum] [-] Offset calculation very wrong? Offset: {:#x}",
                 rva_offset_callback
             );
             return;
@@ -448,9 +448,9 @@ pub unsafe extern "system" fn syscall_handler(
 ) -> i32 {
     // todo remove once ready for mass testing
     let proc_name = get_process_name().to_lowercase();
-    // if !proc_name.contains("malware.e") {
-    //     return 1;
-    // }
+    if !proc_name.contains("notepad.e") && !proc_name.contains("alware.e") {
+        return 1;
+    }
 
     let ktrap_frame = match extract_trap() {
         Some(p) => unsafe { *p },

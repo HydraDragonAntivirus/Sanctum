@@ -3,6 +3,7 @@
 use crate::utils::log::LogLevel;
 
 use super::driver_manager::SanctumDriverManager;
+use anyhow::{Result, bail};
 use core::str;
 use shared_no_std::{
     constants::VERSION_CLIENT,
@@ -13,7 +14,7 @@ use shared_no_std::{
         SANC_IOCTL_DLL_INJECT_FAILED, SANC_IOCTL_DLL_SYSCALL, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS,
         SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN, SANC_IOCTL_DRIVER_GET_MESSAGE_LEN,
         SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING, SANC_IOCTL_PING_WITH_STRUCT,
-        SANC_IOCTL_SEND_BASE_ADDRS, SancIoctlPing,
+        SANC_IOCTL_PROC_R_GH, SANC_IOCTL_SEND_BASE_ADDRS, SancIoctlPing,
     },
 };
 use std::{ffi::c_void, slice::from_raw_parts};
@@ -141,6 +142,38 @@ impl SanctumDriverManager {
         }
     }
 
+    /// Send an ioctl to the driver to notify the process is ready for ghost hunting
+    pub fn ioctl_notify_process_ready_for_gh(&mut self, pid: u32) -> Result<()> {
+        if self.handle_via_path.handle.is_none() {
+            self.init_handle_via_registry();
+            if self.handle_via_path.handle.is_none() {
+                bail!("could not get handle to driver");
+            }
+        }
+
+        let result = unsafe {
+            DeviceIoControl(
+                self.handle_via_path.handle.unwrap(),
+                SANC_IOCTL_PROC_R_GH,
+                Some(&pid as *const _ as *const _),
+                size_of::<u32>() as _,
+                None,
+                0,
+                None,
+                None,
+            )
+        };
+
+        if let Err(e) = result {
+            let msg = format!("Error from attempting IOCTL call. {e}");
+            self.log.log(LogLevel::Error, &msg);
+
+            bail!(msg);
+        }
+
+        Ok(())
+    }
+
     /// Ping the driver from usermode
     pub fn ioctl_ping_driver(&mut self) -> String {
         //
@@ -173,13 +206,6 @@ impl SanctumDriverManager {
 
         // attempt the call
         let result = unsafe {
-            // todo implementation for WriteFile
-            // WriteFile(
-            //     self.handle_via_path.handle.unwrap(),
-            //     Some(message),
-            //     Some(&mut bytes_returned),
-            //     None,
-            // )
             DeviceIoControl(
                 self.handle_via_path.handle.unwrap(),
                 SANC_IOCTL_PING,

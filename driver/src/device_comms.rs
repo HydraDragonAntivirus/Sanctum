@@ -651,6 +651,31 @@ pub fn ioctl_dll_hook_syscall(
     Ok(())
 }
 
+/// Tells the driver a given process is ready for ghost hunting (to be called after successful re-locations of ntdll by
+/// sanctum.dll).
+pub fn ioctl_process_finished_sanc_dll_load(
+    p_stack_location: *mut _IO_STACK_LOCATION,
+    pirp: PIRP,
+) -> NTSTATUS {
+    let mut ioctl_buffer = IoctlBuffer::new(p_stack_location, pirp);
+    if ioctl_buffer.receive().is_err() {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    let input_data = ioctl_buffer.buf as *const _ as *const u32;
+    if input_data.is_null() {
+        println!("[sanctum] [-] Error receiving input data for ioctl_proc_r_gh.");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // SAFETY: Pointer validity checked above
+    let pid = unsafe { *input_data };
+
+    ProcessMonitor::mark_process_ready_for_ghost_hunting(pid);
+
+    STATUS_SUCCESS
+}
+
 pub fn ioctl_failed_to_inject_dll(
     p_stack_location: *mut _IO_STACK_LOCATION,
     pirp: PIRP,

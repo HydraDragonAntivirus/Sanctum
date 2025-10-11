@@ -40,7 +40,7 @@ pub unsafe extern "C" fn thread_callback(
     let _pid = pid as u32;
     let _thread_id_u32 = thread_id as u32;
 
-    // thread_reg_alt_callbacks(thread_id);
+    thread_reg_alt_callbacks(thread_id);
 }
 
 pub fn thread_reg_alt_callbacks(thread_id: *mut c_void) {

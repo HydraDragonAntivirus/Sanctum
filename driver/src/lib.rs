@@ -45,7 +45,7 @@ use shared_no_std::{
         SANC_IOCTL_CHECK_COMPATIBILITY, SANC_IOCTL_DLL_INJECT_FAILED, SANC_IOCTL_DLL_SYSCALL,
         SANC_IOCTL_DRIVER_GET_IMAGE_LOADS, SANC_IOCTL_DRIVER_GET_IMAGE_LOADS_LEN,
         SANC_IOCTL_DRIVER_GET_MESSAGE_LEN, SANC_IOCTL_DRIVER_GET_MESSAGES, SANC_IOCTL_PING,
-        SANC_IOCTL_PING_WITH_STRUCT, SANC_IOCTL_SEND_BASE_ADDRS,
+        SANC_IOCTL_PING_WITH_STRUCT, SANC_IOCTL_PROC_R_GH, SANC_IOCTL_SEND_BASE_ADDRS,
     },
 };
 use utils::{Log, LogLevel};
@@ -77,7 +77,7 @@ use wdk_alloc::WdkAllocator;
 
 use crate::{
     core::process_monitor::{MONITORED_FN_PTRS, set_monitored_dll_fn_ptrs},
-    device_comms::ioctl_failed_to_inject_dll,
+    device_comms::{ioctl_failed_to_inject_dll, ioctl_process_finished_sanc_dll_load},
 };
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
@@ -505,6 +505,7 @@ unsafe extern "C" fn handle_ioctl(_device: *mut DEVICE_OBJECT, pirp: PIRP) -> NT
 
             STATUS_SUCCESS
         }
+        SANC_IOCTL_PROC_R_GH => ioctl_process_finished_sanc_dll_load(p_stack_location, pirp),
 
         _ => {
             println!(
