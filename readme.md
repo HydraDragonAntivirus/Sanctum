@@ -5,6 +5,9 @@
 The Sanctum EDR is an &#128679; **experimental and in development** &#128679; proof of concept for an EDR (Endpoint Detection and Response) tool, fully written in Rust! No
 C required in this project baby!
 
+**BREAKING CHANGE NOTIFICATION**: If you are recently updating this project, you now need to put
+`sanctum.dll` in `C:\Windows\System32` (documented in below instructions).
+
 I'm documenting this project on my [blog](https://fluxsec.red/)!
 
 Currently, there are some features disabled (via comments, feel free to uncomment them to turn them back on) - this was due to some occasional random stability issues.
@@ -157,18 +160,19 @@ Must be build in release mode to match the signing script - if you wanna build i
 Now to finish off, we want to move the binaries into the guest VM and run things!
 
 1) Move `um_engine.exe`, `elam_installer`, `app` (gui) into ~Desktop\sanctum
-2) Move `sanctum.sys`, `sanctum_ppl_runner.exe`, `sanctum.dll` into %AppData%\Sanctum
-3) In an admin powershell terminal:
+2) Move `sanctum.sys` & `sanctum_ppl_runner.exe` into %AppData%\Sanctum
+3) Move `sanctum.dll` into `C:\Windows\System32`
+4) In an admin powershell terminal:
    1) cd ~Desktop\sanctum
    2) `.\elam_installer.exe` - this should work and now prompt you to reboot.
-4) Reboot
-5) In an admin powershell terminal:
+5) Reboot
+6) In an admin powershell terminal:
    1) cd ~Desktop\sanctum
    2) `.\elam_installer.exe` - this time no prompt to reboot
    3) `sc.exe start sanctum_ppl_runner` - This should run your PPL service. If you have issues, check Event Viewer, or go to Services -> sanctum_ppl_runner and start it from there (may give more verbose error messages)
-6) Run um_engine as admin
-7) Run the GUI `app.exe` as admin
-8) Now you should be good to start the driver from the GUI if all went well!
+7) Run um_engine as admin
+8) Run the GUI `app.exe` as admin
+9) Now you should be good to start the driver from the GUI if all went well!
 
 **Important Note**: `elam_installer.exe` and starting the PPL needs to be run every reboot.
 
