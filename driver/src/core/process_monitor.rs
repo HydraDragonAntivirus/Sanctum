@@ -733,7 +733,7 @@ fn process_monitor_thread_termination_flag_raised() -> bool {
 /// It may be possible, during the snapshot, a new process is started and is missed.
 fn walk_processes_get_details(processes: &mut BTreeMap<u32, Process>) {
     // Offsets in bytes for Win11 24H2
-    const ACTIVE_PROCESS_LINKS_OFFSET: usize = 0x448;
+    const ACTIVE_PROCESS_LINKS_OFFSET: usize = 0x1d8;
 
     let current_process = unsafe { IoGetCurrentProcess() };
     if current_process.is_null() {
