@@ -91,15 +91,16 @@ fn run_service(h_status: SERVICE_STATUS_HANDLE) {
         let mut hydra_dragon_path_buf = PathBuf::from(&program_files_path);
         hydra_dragon_path_buf.push("HydraDragonAntivirus");
         hydra_dragon_path_buf.push("HydraDragonAntivirusLauncher.exe");
-        let hydra_dragon_path = hydra_dragon_path_buf.to_str().unwrap_or_else(|| {
+
+        if let Some(hydra_dragon_path) = hydra_dragon_path_buf.to_str() {
+            spawn_child_ppl_process(hydra_dragon_path);
+        } else {
             event_log(
-                "Invalid path for HydraDragonAntivirusLauncher.exe. Exiting.",
+                "Invalid path for HydraDragonAntivirusLauncher.exe. Skipping.",
                 EVENTLOG_ERROR_TYPE,
                 EventID::GeneralError,
             );
-            std::process::exit(1);
-        });
-        spawn_child_ppl_process(hydra_dragon_path);
+        }
 
         // Construct path for owlyshield_ransom.exe
         let mut owlyshield_path_buf = PathBuf::from(&program_files_path);
@@ -108,15 +109,16 @@ fn run_service(h_status: SERVICE_STATUS_HANDLE) {
         owlyshield_path_buf.push("Owlyshield");
         owlyshield_path_buf.push("Owlyshield Service");
         owlyshield_path_buf.push("owlyshield_ransom.exe");
-        let owlyshield_path = owlyshield_path_buf.to_str().unwrap_or_else(|| {
+
+        if let Some(owlyshield_path) = owlyshield_path_buf.to_str() {
+            spawn_child_ppl_process(owlyshield_path);
+        } else {
             event_log(
-                "Invalid path for owlyshield_ransom.exe. Exiting.",
+                "Invalid path for owlyshield_ransom.exe. Skipping.",
                 EVENTLOG_ERROR_TYPE,
                 EventID::GeneralError,
             );
-            std::process::exit(1);
-        });
-        spawn_child_ppl_process(owlyshield_path);
+        }
 
         // event loop
         while !SERVICE_STOP.load(Ordering::SeqCst) {
@@ -135,24 +137,26 @@ fn run_service(h_status: SERVICE_STATUS_HANDLE) {
 fn spawn_child_ppl_process(process_to_run: &str) {
     let mut startup_info = STARTUPINFOEXW::default();
     startup_info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
-    let mut attribute_size_list: usize = 0;
 
-    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut attribute_size_list) };
+    let mut attribute_size_list: usize = 0;
+    let _ = unsafe {
+        InitializeProcThreadAttributeList(None, 1, None, &mut attribute_size_list)
+    };
 
     if attribute_size_list == 0 {
         event_log(
-            "Error initialising thread attribute list",
+            &format!("Error initialising thread attribute list for {}", process_to_run),
             EVENTLOG_ERROR_TYPE,
             EventID::GeneralError,
         );
-        std::process::exit(1);
+        return;
     }
 
     let mut attribute_list_mem = vec![0u8; attribute_size_list];
     startup_info.lpAttributeList =
         LPPROC_THREAD_ATTRIBUTE_LIST(attribute_list_mem.as_mut_ptr() as *mut _);
 
-    if let Err(_) = unsafe {
+    if let Err(e) = unsafe {
         InitializeProcThreadAttributeList(
             Some(startup_info.lpAttributeList),
             1,
@@ -161,11 +165,11 @@ fn spawn_child_ppl_process(process_to_run: &str) {
         )
     } {
         event_log(
-            "Error initialising thread attribute list",
+            &format!("Error initialising thread attribute list for {}: {}", process_to_run, e),
             EVENTLOG_ERROR_TYPE,
             EventID::GeneralError,
         );
-        std::process::exit(1);
+        return;
     }
 
     // update protection level to be the same as the PPL service
@@ -182,11 +186,11 @@ fn spawn_child_ppl_process(process_to_run: &str) {
         )
     } {
         event_log(
-            &format!("Error UpdateProcThreadAttribute, {}", e),
+            &format!("Error UpdateProcThreadAttribute for {}: {}", process_to_run, e),
             EVENTLOG_ERROR_TYPE,
             EventID::GeneralError,
         );
-        std::process::exit(1);
+        return;
     }
 
     // start the process
@@ -210,7 +214,7 @@ fn spawn_child_ppl_process(process_to_run: &str) {
     } {
         event_log(
             &format!(
-                "Error calling starting child PPL process via CreateProcessW for {}, {}",
+                "Error starting child PPL process via CreateProcessW for {}: {}",
                 process_to_run, e
             ),
             EVENTLOG_ERROR_TYPE,
