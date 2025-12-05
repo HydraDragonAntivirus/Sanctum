@@ -92,12 +92,6 @@ fn run_service(h_status: SERVICE_STATUS_HANDLE) {
         hydra_dragon_path_buf.push("HydraDragonAntivirus");
         hydra_dragon_path_buf.push("HydraDragonAntivirusLauncher.exe");
 
-        event_log(
-            &format!("Attempting to start HydraDragonLauncher at: {}", hydra_dragon_path_buf.display()),
-            EVENTLOG_INFORMATION_TYPE,
-            EventID::Info,
-        );
-
         if let Some(hydra_dragon_path) = hydra_dragon_path_buf.to_str() {
             spawn_child_ppl_process(hydra_dragon_path);
         } else {
@@ -115,12 +109,6 @@ fn run_service(h_status: SERVICE_STATUS_HANDLE) {
         owlyshield_path_buf.push("Owlyshield");
         owlyshield_path_buf.push("Owlyshield Service");
         owlyshield_path_buf.push("owlyshield_ransom.exe");
-
-        event_log(
-            &format!("Attempting to start Owlyshield at: {}", owlyshield_path_buf.display()),
-            EVENTLOG_INFORMATION_TYPE,
-            EventID::Info,
-        );
 
         if let Some(owlyshield_path) = owlyshield_path_buf.to_str() {
             spawn_child_ppl_process(owlyshield_path);
