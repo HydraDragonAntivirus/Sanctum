@@ -8,6 +8,7 @@ set PFX_PASSWORD=password
 :: Development/Test paths (user's Documents folder)
 set HYDRA_DRAGON_PATH=C:\Users\%USERNAME%\Documents\HydraDragonAntivirus\HydraDragonAntivirusLauncher.exe
 set OWLYSHIELD_PATH=C:\Users\%USERNAME%\Documents\HydraDragonAntivirus\hydradragon\Owlyshield\Owlyshield Service\owlyshield_ransom.exe
+set TENSORFLOW_DLL_PATH=C:\Users\%USERNAME%\Documents\HydraDragonAntivirus\hydradragon\OWlyshield\Owlyshield Service\tensorflowlite_c.dll
 
 :: Check if signtool.exe is available
 for /f "delims=" %%A in ('where signtool 2^>nul') do set SIGNTOOL_PATH=%%A
@@ -38,7 +39,7 @@ set SIGN_FAILED=0
 :: Sign HydraDragonAntivirusLauncher
 :: ==============================
 if exist "%HYDRA_DRAGON_PATH%" (
-    echo [1/2] Signing HydraDragonAntivirusLauncher: %HYDRA_DRAGON_PATH%
+    echo [1/3] Signing HydraDragonAntivirusLauncher: %HYDRA_DRAGON_PATH%
     "%SIGNTOOL_PATH%" sign /fd SHA256 /v /f "%PFX_FILE%" /p "%PFX_PASSWORD%" "%HYDRA_DRAGON_PATH%"
     if !ERRORLEVEL! EQU 0 (
         echo [SUCCESS] HydraDragonAntivirusLauncher signed successfully!
@@ -58,7 +59,7 @@ if exist "%HYDRA_DRAGON_PATH%" (
 :: Sign owlyshield_ransom
 :: ==============================
 if exist "%OWLYSHIELD_PATH%" (
-    echo [2/2] Signing owlyshield_ransom: %OWLYSHIELD_PATH%
+    echo [2/3] Signing owlyshield_ransom: %OWLYSHIELD_PATH%
     "%SIGNTOOL_PATH%" sign /fd SHA256 /v /f "%PFX_FILE%" /p "%PFX_PASSWORD%" "%OWLYSHIELD_PATH%"
     if !ERRORLEVEL! EQU 0 (
         echo [SUCCESS] owlyshield_ransom signed successfully!
@@ -70,6 +71,26 @@ if exist "%OWLYSHIELD_PATH%" (
     echo.
 ) else (
     echo [WARNING] owlyshield_ransom not found: %OWLYSHIELD_PATH%
+    echo [INFO] Skipping...
+    echo.
+)
+
+:: ==============================
+:: Sign tensorflowlite_c.dll
+:: ==============================
+if exist "%TENSORFLOW_DLL_PATH%" (
+    echo [3/3] Signing tensorflowlite_c.dll: %TENSORFLOW_DLL_PATH%
+    "%SIGNTOOL_PATH%" sign /fd SHA256 /v /f "%PFX_FILE%" /p "%PFX_PASSWORD%" "%TENSORFLOW_DLL_PATH%"
+    if !ERRORLEVEL! EQU 0 (
+        echo [SUCCESS] tensorflowlite_c.dll signed successfully!
+        set /a SIGN_SUCCESS+=1
+    ) else (
+        echo [ERROR] Failed to sign tensorflowlite_c.dll.
+        set /a SIGN_FAILED+=1
+    )
+    echo.
+) else (
+    echo [WARNING] tensorflowlite_c.dll not found: %TENSORFLOW_DLL_PATH%
     echo [INFO] Skipping...
     echo.
 )
