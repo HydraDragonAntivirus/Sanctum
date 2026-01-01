@@ -82,16 +82,27 @@ impl Core {
 
         // Start Firewall Telemetry Server
         tokio::spawn(async move {
+            println!("[Sanctum] Firewall Telemetry Relay starting...");
             loop {
-                let mut server = ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .create(PIPE_FIREWALL_TELEMETRY)
-                    .expect("Failed to create firewall telemetry pipe");
+                let mut server = match ServerOptions::new()
+                    .first_pipe_instance(false) // Allow more than just the very first one
+                    .max_instances(10)
+                    .create(PIPE_FIREWALL_TELEMETRY) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[Sanctum] Failed to create telemetry pipe: {}", e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
 
+                println!("[Sanctum] Waiting for Firewall to connect to telemetry pipe...");
                 if server.connect().await.is_ok() {
+                    println!("[Sanctum] Firewall connected to telemetry! Streaming events...");
                     while let Some(msg) = fw_rx.recv().await {
                         if let Ok(data) = to_vec(&msg) {
-                            if let Err(_) = server.write_all(&data).await {
+                            if let Err(e) = server.write_all(&data).await {
+                                println!("[Sanctum] Firewall disconnected: {}", e);
                                 break; // connection broken
                             }
                         }
