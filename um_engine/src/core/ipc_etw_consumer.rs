@@ -72,19 +72,28 @@ pub async fn run_ipc_for_etw(tx: Sender<Syscall>) {
                         // deserialise the request
                         match from_slice::<Syscall>(&buffer[..bytes_read]) {
                             Ok(etw_msg) => {
+                                println!(
+                                    "[Sanctum] [ETW] Received telemetry from PPL (PID: {}): {:?}",
+                                    etw_msg.pid, etw_msg.data
+                                );
                                 // check the PID of the transmission is our PPL service so we can detect tempering
                                 let pipe_pid = match get_pid_from_pipe(&connected_client) {
                                     Some(p) => p,
                                     None => {
-                                        // todo this is bad and should do something
-                                        eprintln!("!!!!!!!!!!!!! GOT NO PID");
-                                        todo!()
+                                        eprintln!(
+                                            "[Sanctum] [ETW] Internal Error: Could not get PID from pipe!"
+                                        );
+                                        return;
                                     }
                                 };
                                 // SAFETY: The PPL_SERVICE_PID is only initialised once mutably, so is safe to read.
                                 if pipe_pid != unsafe { PPL_SERVICE_PID } {
-                                    // todo this is bad and should do something
-                                    eprintln!("!!!!!!!!!!! PIDS DONT MATCH!");
+                                    eprintln!(
+                                        "[Sanctum] [ETW] SECURITY WARNING: Received telemetry from untrusted PID: {} (Expected: {})",
+                                        pipe_pid,
+                                        unsafe { PPL_SERVICE_PID }
+                                    );
+                                    return;
                                 }
 
                                 //

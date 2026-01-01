@@ -87,14 +87,15 @@ impl Core {
                 let mut server = match ServerOptions::new()
                     .first_pipe_instance(false) // Allow more than just the very first one
                     .max_instances(10)
-                    .create(PIPE_FIREWALL_TELEMETRY) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("[Sanctum] Failed to create telemetry pipe: {}", e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    };
+                    .create(PIPE_FIREWALL_TELEMETRY)
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[Sanctum] Failed to create telemetry pipe: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
 
                 println!("[Sanctum] Waiting for Firewall to connect to telemetry pipe...");
                 if server.connect().await.is_ok() {

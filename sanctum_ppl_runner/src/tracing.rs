@@ -17,13 +17,14 @@ use windows::{
                 CONTROLTRACE_HANDLE, CloseTrace, EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_HEADER,
                 EVENT_RECORD, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
                 EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, OpenTraceW,
-                PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, ProcessTrace,
-                StartTraceW, StopTraceW, TRACE_EVENT_INFO, TRACE_LEVEL_VERBOSE,
-                TdhGetEventInformation,
+                PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
+                PROPERTY_DATA_DESCRIPTOR, ProcessTrace, StartTraceW, StopTraceW, TRACE_EVENT_INFO,
+                TRACE_LEVEL_VERBOSE, TdhGetEventInformation, TdhGetProperty,
             },
             EventLog::{EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE, EVENTLOG_SUCCESS},
             ProcessStatus::GetProcessImageFileNameW,
             Threading::{OpenProcess, PROCESS_ALL_ACCESS},
+            Time::FileTimeToSystemTime,
         },
     },
     core::{PCWSTR, PWSTR},
@@ -440,38 +441,113 @@ unsafe extern "system" fn trace_callback(record: *mut EVENT_RECORD) {
 
     // --- Network ETW Handling ---
     if event_header.ProviderId == HTTP_SERVICE_GUID {
+        // Event ID 1: Request Start
         if descriptor_id == 1 {
-            // Request Start
-            // Payload parsing for HttpService (simplified)
-            // Event 1 has URL, Method, etc.
-            // We transmit it via IPC for the Firewall to see.
-            let activity = NetworkActivityData::Http(HttpActivity {
-                url: "URL extracted from ETW".to_string(), // TODO: Add real parsing if needed
-                method: "GET".to_string(),
-                user_agent: "SanctumGhost".to_string(),
+            if let Some(url) = extract_string_property(record, "Url") {
+                let method =
+                    extract_string_property(record, "Method").unwrap_or_else(|| "GET".to_string());
+
+                event_log(
+                    &format!("[ETW] Captured HTTP URL from PID {}: {}", pid, url),
+                    EVENTLOG_INFORMATION_TYPE,
+                    EventID::Info,
+                );
+
+                let activity = NetworkActivityData::Http(HttpActivity {
+                    url,
+                    method,
+                    user_agent: "SanctumGhost".to_string(),
+                });
+
+                send_etw_info_ipc(Syscall {
+                    pid: pid,
+                    source:
+                        shared_no_std::ghost_hunting::SyscallEventSource::EventSourceSyscallHook,
+                    data: NtFunction::NetworkActivity(activity),
+                });
+            }
+        }
+    } else if event_header.ProviderId == WININET_GUID {
+        if let Some(url) = extract_string_property(record, "Url") {
+            event_log(
+                &format!("[ETW] Captured WinINet URL from PID {}: {}", pid, url),
+                EVENTLOG_INFORMATION_TYPE,
+                EventID::Info,
+            );
+
+            let activity = NetworkActivityData::WinINet(WinINetActivity {
+                url,
+                server: "Unknown".to_string(),
             });
 
             send_etw_info_ipc(Syscall {
                 pid: pid,
-                source: shared_no_std::ghost_hunting::SyscallEventSource::EventSourceSyscallHook, // Using existing source for now
+                source: shared_no_std::ghost_hunting::SyscallEventSource::EventSourceSyscallHook,
                 data: NtFunction::NetworkActivity(activity),
             });
         }
     }
+}
 
-    if event_header.ProviderId == WININET_GUID {
-        // Handle WinINet events
-        let activity = NetworkActivityData::WinINet(WinINetActivity {
-            url: "WinINet URL".to_string(),
-            server: "Unknown".to_string(),
-        });
+/// Helper function to extract a string property from an ETW record by name.
+unsafe fn extract_string_property(record: *mut EVENT_RECORD, name: &str) -> Option<String> {
+    let mut buffer_size: u32 = 0;
 
-        send_etw_info_ipc(Syscall {
-            pid: pid,
-            source: shared_no_std::ghost_hunting::SyscallEventSource::EventSourceSyscallHook,
-            data: NtFunction::NetworkActivity(activity),
-        });
+    // 1. Get the size of the event information
+    // Signature: TdhGetEventInformation(event, context, buffer, buffersize)
+    unsafe {
+        let _ = TdhGetEventInformation(record, None, None, &mut buffer_size);
+        if buffer_size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; buffer_size as usize];
+        let info = buffer.as_mut_ptr() as *mut TRACE_EVENT_INFO;
+
+        if TdhGetEventInformation(record, None, Some(info), &mut buffer_size) != 0 {
+            return None;
+        }
+
+        let info_ref = &*info;
+        let property_count = info_ref.TopLevelPropertyCount;
+
+        // The EventPropertyInfoArray is at the end of the struct
+        let property_array_ptr = info_ref.EventPropertyInfoArray.as_ptr();
+        let property_array =
+            std::slice::from_raw_parts(property_array_ptr, property_count as usize);
+
+        for prop in property_array {
+            let prop_name_ptr = (info as usize + prop.NameOffset as usize) as *const u16;
+            let prop_name = PWSTR(prop_name_ptr as *mut _).to_string().ok()?;
+
+            if prop_name == name {
+                let mut data_buffer = vec![0u8; 4096];
+                let mut descriptor = PROPERTY_DATA_DESCRIPTOR {
+                    PropertyName: (info as usize + prop.NameOffset as usize) as u64,
+                    ArrayIndex: u32::MAX,
+                    ..Default::default()
+                };
+
+                // Signature: TdhGetProperty(pevent, context, descriptors, buffer)
+                let status = TdhGetProperty(record, None, &[descriptor], &mut data_buffer);
+
+                if status == 0 {
+                    // Convert UTF-16 and trim nulls
+                    let u16_data = std::slice::from_raw_parts(
+                        data_buffer.as_ptr() as *const u16,
+                        data_buffer.len() / 2,
+                    );
+                    let s = String::from_utf16_lossy(u16_data);
+                    let trimmed = s.split('\0').next().unwrap_or("").to_string();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
     }
+
+    None
 }
 
 /// Get the process image as a string for a given pid
