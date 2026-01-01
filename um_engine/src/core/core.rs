@@ -120,6 +120,7 @@ impl Core {
             if let Ok(rx) = etw_rx.try_recv() {
                 // If it's a network event, relay it to the firewall
                 if let NtFunction::NetworkActivity(_) = &rx.data {
+                    println!("[Sanctum] Relaying Network Event to Firewall...");
                     let _ = fw_tx.try_send(rx.clone());
                 }
 
