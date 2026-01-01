@@ -139,13 +139,14 @@ fn spawn_child_ppl_process(process_to_run: &str) {
     startup_info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
 
     let mut attribute_size_list: usize = 0;
-    let _ = unsafe {
-        InitializeProcThreadAttributeList(None, 1, None, &mut attribute_size_list)
-    };
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut attribute_size_list) };
 
     if attribute_size_list == 0 {
         event_log(
-            &format!("Error initialising thread attribute list for {}", process_to_run),
+            &format!(
+                "Error initialising thread attribute list for {}",
+                process_to_run
+            ),
             EVENTLOG_ERROR_TYPE,
             EventID::GeneralError,
         );
@@ -165,7 +166,10 @@ fn spawn_child_ppl_process(process_to_run: &str) {
         )
     } {
         event_log(
-            &format!("Error initialising thread attribute list for {}: {}", process_to_run, e),
+            &format!(
+                "Error initialising thread attribute list for {}: {}",
+                process_to_run, e
+            ),
             EVENTLOG_ERROR_TYPE,
             EventID::GeneralError,
         );
@@ -186,7 +190,10 @@ fn spawn_child_ppl_process(process_to_run: &str) {
         )
     } {
         event_log(
-            &format!("Error UpdateProcThreadAttribute for {}: {}", process_to_run, e),
+            &format!(
+                "Error UpdateProcThreadAttribute for {}: {}",
+                process_to_run, e
+            ),
             EVENTLOG_ERROR_TYPE,
             EventID::GeneralError,
         );

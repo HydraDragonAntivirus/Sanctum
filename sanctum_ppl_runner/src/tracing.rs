@@ -6,7 +6,9 @@ use crate::{
     ipc::send_etw_info_ipc,
     logging::{EventID, event_log},
 };
-use shared_no_std::ghost_hunting::{NtFunction, Syscall};
+use shared_no_std::ghost_hunting::{
+    HttpActivity, NetworkActivityData, NtFunction, Syscall, WinINetActivity,
+};
 use windows::{
     Win32::{
         Foundation::{ERROR_SUCCESS, GetLastError, MAX_PATH, STATUS_SUCCESS},
@@ -47,6 +49,14 @@ const KERNEL_THREATINT_TASK_WRITEVM: u16 = 7;
 const KERNEL_THREATINT_TASK_SUSPENDRESUME_THREAD: u16 = 8;
 const KERNEL_THREATINT_TASK_SUSPENDRESUME_PROCESS: u16 = 9;
 const KERNEL_THREATINT_TASK_DRIVER_DEVICE: u16 = 10;
+
+/// The GUID for Microsoft-Windows-HttpService. dd5ef90a-6398-47a4-ad34-4d35d2e7171b
+const HTTP_SERVICE_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0xdd5ef90a_6398_47a4_ad34_4d35d2e7171b);
+
+/// The GUID for Microsoft-Windows-WinINet. 43d1a55c-76d6-4f7e-995c-97171f3603f8
+const WININET_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0x43d1a55c_76d6_4f7e_995c_97171f3603f8);
 
 // Keyword masks for ETW:TI
 const KERNEL_THREATINT_KEYWORD_ALLOCVM_LOCAL: u64 = 0x1;
@@ -189,6 +199,34 @@ fn register_ti_session() {
         stop_trace(handle, session_name, properties);
         std::process::exit(1);
     }
+
+    // Enable HttpService Provider
+    let _ = unsafe {
+        EnableTraceEx2(
+            handle,
+            &HTTP_SERVICE_GUID,
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
+            TRACE_LEVEL_VERBOSE as _,
+            0xFFFFFFFFFFFFFFFF,
+            0,
+            0,
+            None,
+        )
+    };
+
+    // Enable WinINet Provider
+    let _ = unsafe {
+        EnableTraceEx2(
+            handle,
+            &WININET_GUID,
+            EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
+            TRACE_LEVEL_VERBOSE as _,
+            0xFFFFFFFFFFFFFFFF,
+            0,
+            0,
+            None,
+        )
+    };
 
     event_log(
         "Successfully started trace for ETW:TI.",
@@ -398,6 +436,41 @@ unsafe extern "system" fn trace_callback(record: *mut EVENT_RECORD) {
                 EventID::ProcessOfInterestTI,
             );
         }
+    }
+
+    // --- Network ETW Handling ---
+    if event_header.ProviderId == HTTP_SERVICE_GUID {
+        if descriptor_id == 1 {
+            // Request Start
+            // Payload parsing for HttpService (simplified)
+            // Event 1 has URL, Method, etc.
+            // We transmit it via IPC for the Firewall to see.
+            let activity = NetworkActivityData::Http(HttpActivity {
+                url: "URL extracted from ETW".to_string(), // TODO: Add real parsing if needed
+                method: "GET".to_string(),
+                user_agent: "SanctumGhost".to_string(),
+            });
+
+            send_etw_info_ipc(Syscall {
+                pid: pid,
+                source: shared_no_std::ghost_hunting::SyscallEventSource::EventSourceSyscallHook, // Using existing source for now
+                data: NtFunction::NetworkActivity(activity),
+            });
+        }
+    }
+
+    if event_header.ProviderId == WININET_GUID {
+        // Handle WinINet events
+        let activity = NetworkActivityData::WinINet(WinINetActivity {
+            url: "WinINet URL".to_string(),
+            server: "Unknown".to_string(),
+        });
+
+        send_etw_info_ipc(Syscall {
+            pid: pid,
+            source: shared_no_std::ghost_hunting::SyscallEventSource::EventSourceSyscallHook,
+            data: NtFunction::NetworkActivity(activity),
+        });
     }
 }
 
